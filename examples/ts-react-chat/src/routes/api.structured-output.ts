@@ -30,15 +30,63 @@ type Provider = 'openai' | 'grok' | 'groq' | 'openrouter'
 function adapterFor(provider: Provider, model?: string): AnyTextAdapter {
   switch (provider) {
     case 'openai':
-      return openaiText((model || 'gpt-4o') as 'gpt-4o')
+      return openaiText((model || 'gpt-5.2') as 'gpt-5.2')
     case 'grok':
-      return grokText((model || 'grok-3') as 'grok-3')
+      return grokText(
+        (model || 'grok-4-1-fast-reasoning') as 'grok-4-1-fast-reasoning',
+      )
     case 'groq':
       return groqText(
-        (model || 'llama-3.3-70b-versatile') as 'llama-3.3-70b-versatile',
+        (model ||
+          'meta-llama/llama-4-maverick-17b-128e-instruct') as 'meta-llama/llama-4-maverick-17b-128e-instruct',
       )
     case 'openrouter':
-      return openRouterText((model || 'openai/gpt-5.2') as 'openai/gpt-5.2')
+      return openRouterText(
+        (model || 'anthropic/claude-opus-4.7') as 'anthropic/claude-opus-4.7',
+      )
+  }
+}
+
+// Per-provider modelOptions to opt into reasoning surfacing. Without these,
+// reasoning models reason silently and the UI never sees REASONING_* events.
+function reasoningOptionsFor(
+  provider: Provider,
+  model: string | undefined,
+): Record<string, unknown> | undefined {
+  switch (provider) {
+    case 'openai':
+      // Responses API: `reasoning.summary: 'auto'` is what makes the API emit
+      // `response.reasoning_summary_text.delta` events. Only valid on
+      // reasoning models (gpt-5.x, o-series); older models (gpt-4o) reject it.
+      if (
+        model?.startsWith('gpt-5') ||
+        model?.startsWith('o3') ||
+        model?.startsWith('o4')
+      ) {
+        return { reasoning: { summary: 'auto' } }
+      }
+      return undefined
+    case 'groq':
+      // Groq's Chat Completions only streams `delta.reasoning` when
+      // `reasoning_format: 'parsed'`. Required for gpt-oss / qwen3 / kimi-k2
+      // to emit reasoning during structured output (json_schema mode).
+      if (
+        model?.startsWith('openai/gpt-oss') ||
+        model?.startsWith('qwen') ||
+        model?.startsWith('moonshotai/kimi')
+      ) {
+        return { reasoning_format: 'parsed' }
+      }
+      return undefined
+    case 'openrouter':
+      // OpenRouter normalises across providers. `reasoning.effort` triggers
+      // the upstream model's reasoning + surfaces the deltas.
+      return { reasoning: { effort: 'medium' } }
+    case 'grok':
+      // xAI surfaces `delta.reasoning_content` automatically on reasoning
+      // models (grok-3-mini, grok-4-fast-reasoning, grok-4-1-fast-reasoning).
+      // No request param needed.
+      return undefined
   }
 }
 
@@ -56,6 +104,8 @@ export const Route = createFileRoute('/api/structured-output')({
         const resolvedProvider: Provider = provider || 'openrouter'
 
         try {
+          const modelOptions = reasoningOptionsFor(resolvedProvider, model)
+
           if (stream) {
             const abortController = new AbortController()
             request.signal.addEventListener('abort', () =>
@@ -63,9 +113,13 @@ export const Route = createFileRoute('/api/structured-output')({
             )
             const streamIterable = chat({
               adapter: adapterFor(resolvedProvider, model),
+              modelOptions: modelOptions as never,
               messages: [{ role: 'user', content: prompt }],
               outputSchema: GuitarRecommendationSchema,
               stream: true,
+              // Surface adapter request/provider/error logs so we can see
+              // exactly which Responses API events the model is emitting.
+              debug: true,
               abortController,
             }) as AsyncIterable<StreamChunk>
             return toServerSentEventsResponse(streamIterable, {
@@ -75,8 +129,10 @@ export const Route = createFileRoute('/api/structured-output')({
 
           const result = await chat({
             adapter: adapterFor(resolvedProvider, model),
+            modelOptions: modelOptions as never,
             messages: [{ role: 'user', content: prompt }],
             outputSchema: GuitarRecommendationSchema,
+            debug: true,
           })
 
           return new Response(JSON.stringify({ data: result }), {

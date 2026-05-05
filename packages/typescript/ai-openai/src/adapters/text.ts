@@ -269,7 +269,10 @@ export class OpenAITextAdapter<
     const messageId = generateId(this.name)
     let hasEmittedRunStarted = false
     let hasEmittedTextMessageStart = false
+    let hasEmittedReasoningStart = false
+    const reasoningMessageId = generateId(this.name)
     let accumulatedContent = ''
+    let accumulatedReasoning = ''
     let model: string = chatOptions.model
     let usage:
       | { promptTokens: number; completionTokens: number; totalTokens: number }
@@ -351,6 +354,52 @@ export class OpenAITextAdapter<
           return
         }
 
+        // Reasoning deltas (o-series + GPT-5 reasoning models surface a
+        // chain-of-thought stream). Re-emit them as REASONING_MESSAGE_CONTENT
+        // so consumers can show "thinking" UI before any JSON arrives.
+        if (
+          (chunk.type === 'response.reasoning_text.delta' ||
+            chunk.type === 'response.reasoning_summary_text.delta') &&
+          chunk.delta
+        ) {
+          const delta: unknown = chunk.delta
+          const reasoningDelta =
+            typeof delta === 'string'
+              ? delta
+              : Array.isArray(delta)
+                ? delta.join('')
+                : ''
+
+          if (reasoningDelta) {
+            if (!hasEmittedReasoningStart) {
+              hasEmittedReasoningStart = true
+              yield asChunk({
+                type: 'REASONING_START',
+                messageId: reasoningMessageId,
+                model,
+                timestamp,
+              })
+              yield asChunk({
+                type: 'REASONING_MESSAGE_START',
+                messageId: reasoningMessageId,
+                role: 'reasoning' as const,
+                model,
+                timestamp,
+              })
+            }
+
+            accumulatedReasoning += reasoningDelta
+
+            yield asChunk({
+              type: 'REASONING_MESSAGE_CONTENT',
+              messageId: reasoningMessageId,
+              delta: reasoningDelta,
+              model,
+              timestamp,
+            })
+          }
+        }
+
         if (chunk.type === 'response.output_text.delta' && chunk.delta) {
           const textDelta = Array.isArray(chunk.delta)
             ? chunk.delta.join('')
@@ -359,6 +408,24 @@ export class OpenAITextAdapter<
               : ''
 
           if (textDelta) {
+            // Close reasoning before text starts so consumers see the
+            // contractual REASONING_END → TEXT_MESSAGE_START transition.
+            if (hasEmittedReasoningStart) {
+              hasEmittedReasoningStart = false
+              yield asChunk({
+                type: 'REASONING_MESSAGE_END',
+                messageId: reasoningMessageId,
+                model,
+                timestamp,
+              })
+              yield asChunk({
+                type: 'REASONING_END',
+                messageId: reasoningMessageId,
+                model,
+                timestamp,
+              })
+            }
+
             if (!hasEmittedTextMessageStart) {
               hasEmittedTextMessageStart = true
               yield asChunk({
@@ -426,6 +493,22 @@ export class OpenAITextAdapter<
       // Always finalize, even if the upstream stream closed without a
       // `response.completed` event (truncation, transport drop). Otherwise
       // consumers wait forever on a missing terminal event.
+      if (hasEmittedReasoningStart) {
+        hasEmittedReasoningStart = false
+        yield asChunk({
+          type: 'REASONING_MESSAGE_END',
+          messageId: reasoningMessageId,
+          model,
+          timestamp,
+        })
+        yield asChunk({
+          type: 'REASONING_END',
+          messageId: reasoningMessageId,
+          model,
+          timestamp,
+        })
+      }
+
       if (hasEmittedTextMessageStart) {
         yield asChunk({
           type: 'TEXT_MESSAGE_END',
@@ -482,6 +565,9 @@ export class OpenAITextAdapter<
         value: {
           object: transformed,
           raw: accumulatedContent,
+          // Surface accumulated chain-of-thought (if any) for consumers that
+          // only subscribe to the terminal event.
+          ...(accumulatedReasoning ? { reasoning: accumulatedReasoning } : {}),
         },
         model,
         timestamp,

@@ -886,6 +886,134 @@ describe('Grok structuredOutputStream', () => {
     expect(chunks.filter((c) => c.type === 'CUSTOM')).toHaveLength(0)
   })
 
+  it('surfaces accumulated reasoning_content on the structured-output.complete event', async () => {
+    // xAI reasoning models stream chain-of-thought via `delta.reasoning_content`
+    // (DeepSeek convention). The OpenAI SDK doesn't type this field but the
+    // runtime payload includes it.
+    const streamChunks = [
+      {
+        id: 'chatcmpl-reason',
+        model: 'grok-4-1-fast-reasoning',
+        choices: [
+          {
+            delta: { reasoning_content: 'Considering the budget... ' },
+            finish_reason: null,
+          },
+        ],
+      },
+      {
+        id: 'chatcmpl-reason',
+        model: 'grok-4-1-fast-reasoning',
+        choices: [
+          {
+            delta: { reasoning_content: 'a Strat would suit them.' },
+            finish_reason: null,
+          },
+        ],
+      },
+      {
+        id: 'chatcmpl-reason',
+        model: 'grok-4-1-fast-reasoning',
+        choices: [
+          {
+            delta: { content: '{"name":"Strat","price":1299}' },
+            finish_reason: 'stop',
+          },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 9, total_tokens: 19 },
+      },
+    ]
+
+    setupMockSdkClient(streamChunks)
+    const adapter = createAdapter()
+
+    const chunks: Array<StreamChunk> = []
+    for await (const chunk of adapter.structuredOutputStream({
+      chatOptions: {
+        model: 'grok-4-1-fast-reasoning',
+        messages: [{ role: 'user', content: 'Recommend a guitar' }],
+        logger: testLogger,
+      },
+      outputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          price: { type: 'number' },
+        },
+        required: ['name', 'price'],
+      },
+    })) {
+      chunks.push(chunk)
+    }
+
+    // Reasoning lifecycle events emitted before text
+    const types = chunks.map((c) => c.type)
+    expect(types.indexOf('REASONING_START')).toBeGreaterThanOrEqual(0)
+    expect(types.indexOf('REASONING_MESSAGE_END')).toBeLessThan(
+      types.indexOf('TEXT_MESSAGE_START'),
+    )
+
+    const reasoningChunks = chunks.filter(
+      (c): c is Extract<StreamChunk, { type: 'REASONING_MESSAGE_CONTENT' }> =>
+        c.type === 'REASONING_MESSAGE_CONTENT',
+    )
+    expect(reasoningChunks).toHaveLength(2)
+
+    const customChunks = chunks.filter(
+      (c): c is Extract<StreamChunk, { type: 'CUSTOM' }> => c.type === 'CUSTOM',
+    )
+    expect(customChunks).toHaveLength(1)
+    expect(customChunks[0]!.value).toEqual({
+      object: { name: 'Strat', price: 1299 },
+      raw: '{"name":"Strat","price":1299}',
+      reasoning: 'Considering the budget... a Strat would suit them.',
+    })
+  })
+
+  it('omits reasoning from the CUSTOM event when none was streamed', async () => {
+    const streamChunks = [
+      {
+        id: 'chatcmpl-noreason',
+        model: 'grok-3',
+        choices: [
+          {
+            delta: { content: '{"name":"Strat","price":1299}' },
+            finish_reason: 'stop',
+          },
+        ],
+        usage: { prompt_tokens: 5, completion_tokens: 9, total_tokens: 14 },
+      },
+    ]
+
+    setupMockSdkClient(streamChunks)
+    const adapter = createAdapter()
+
+    const chunks: Array<StreamChunk> = []
+    for await (const chunk of adapter.structuredOutputStream({
+      chatOptions: {
+        model: 'grok-3',
+        messages: [{ role: 'user', content: 'Recommend a guitar' }],
+        logger: testLogger,
+      },
+      outputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          price: { type: 'number' },
+        },
+        required: ['name', 'price'],
+      },
+    })) {
+      chunks.push(chunk)
+    }
+
+    const customChunks = chunks.filter(
+      (c): c is Extract<StreamChunk, { type: 'CUSTOM' }> => c.type === 'CUSTOM',
+    )
+    expect(customChunks).toHaveLength(1)
+    expect(customChunks[0]!.value).not.toHaveProperty('reasoning')
+  })
+
   it('transforms null values to undefined on the parsed object', async () => {
     const streamChunks = [
       {

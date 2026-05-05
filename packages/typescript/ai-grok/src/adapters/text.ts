@@ -236,6 +236,7 @@ export class GrokTextAdapter<
     const { chatOptions, outputSchema } = options
     const { logger } = chatOptions
     const timestamp = Date.now()
+    const reasoningMessageId = generateId(this.name)
     const aguiState = {
       runId: chatOptions.runId ?? generateId(this.name),
       threadId: chatOptions.threadId ?? generateId(this.name),
@@ -244,6 +245,7 @@ export class GrokTextAdapter<
       hasEmittedRunStarted: false,
       hasEmittedTextMessageStart: false,
       hasEmittedTextMessageEnd: false,
+      hasEmittedReasoningStart: false,
       hasFinalizedChoice: false,
       deferredUsage: undefined as
         | {
@@ -261,6 +263,7 @@ export class GrokTextAdapter<
     )
 
     let accumulatedContent = ''
+    let accumulatedReasoning = ''
     let currentModel = chatOptions.model
 
     try {
@@ -306,8 +309,62 @@ export class GrokTextAdapter<
         const choice = chunk.choices[0]
         if (!choice) continue
 
+        // xAI reasoning models surface chain-of-thought via `delta.reasoning_content`
+        // (DeepSeek convention). The OpenAI SDK doesn't type this field so we read
+        // it via an unknown cast.
+        const deltaUnknown = choice.delta as unknown as {
+          reasoning_content?: string
+          reasoning?: string
+        }
+        const deltaReasoning =
+          deltaUnknown.reasoning_content ?? deltaUnknown.reasoning
+        if (deltaReasoning) {
+          if (!aguiState.hasEmittedReasoningStart) {
+            aguiState.hasEmittedReasoningStart = true
+            yield asChunk({
+              type: 'REASONING_START',
+              messageId: reasoningMessageId,
+              model: currentModel || chatOptions.model,
+              timestamp,
+            })
+            yield asChunk({
+              type: 'REASONING_MESSAGE_START',
+              messageId: reasoningMessageId,
+              role: 'reasoning' as const,
+              model: currentModel || chatOptions.model,
+              timestamp,
+            })
+          }
+          accumulatedReasoning += deltaReasoning
+          yield asChunk({
+            type: 'REASONING_MESSAGE_CONTENT',
+            messageId: reasoningMessageId,
+            delta: deltaReasoning,
+            model: currentModel || chatOptions.model,
+            timestamp,
+          })
+        }
+
         const deltaContent = choice.delta.content
         if (deltaContent) {
+          // Close reasoning before text starts so consumers see the
+          // contractual REASONING_END → TEXT_MESSAGE_START transition.
+          if (aguiState.hasEmittedReasoningStart) {
+            aguiState.hasEmittedReasoningStart = false
+            yield asChunk({
+              type: 'REASONING_MESSAGE_END',
+              messageId: reasoningMessageId,
+              model: currentModel || chatOptions.model,
+              timestamp,
+            })
+            yield asChunk({
+              type: 'REASONING_END',
+              messageId: reasoningMessageId,
+              model: currentModel || chatOptions.model,
+              timestamp,
+            })
+          }
+
           if (!aguiState.hasEmittedTextMessageStart) {
             aguiState.hasEmittedTextMessageStart = true
             yield asChunk({
@@ -366,6 +423,22 @@ export class GrokTextAdapter<
       // a finish reason — we still owe consumers a CUSTOM + RUN_FINISHED (or
       // RUN_ERROR), never silence.
       const resolvedModel = currentModel || chatOptions.model
+
+      if (aguiState.hasEmittedReasoningStart) {
+        aguiState.hasEmittedReasoningStart = false
+        yield asChunk({
+          type: 'REASONING_MESSAGE_END',
+          messageId: reasoningMessageId,
+          model: resolvedModel,
+          timestamp,
+        })
+        yield asChunk({
+          type: 'REASONING_END',
+          messageId: reasoningMessageId,
+          model: resolvedModel,
+          timestamp,
+        })
+      }
 
       if (
         aguiState.hasEmittedTextMessageStart &&
@@ -429,6 +502,7 @@ export class GrokTextAdapter<
         value: {
           object: transformed,
           raw: accumulatedContent,
+          ...(accumulatedReasoning ? { reasoning: accumulatedReasoning } : {}),
         },
         model: resolvedModel,
         timestamp,
