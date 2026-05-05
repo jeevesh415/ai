@@ -1664,3 +1664,390 @@ describe('OpenRouter STEP event consistency', () => {
     expect(stepFinished).toHaveLength(1)
   })
 })
+
+describe('OpenRouter structuredOutputStream', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('issues a single streaming request with response_format json_schema and emits parsed object', async () => {
+    const streamChunks = [
+      {
+        id: 'chatcmpl-stream-1',
+        model: 'openai/gpt-4o-mini',
+        choices: [{ delta: { content: '{"name":"Ali' }, finishReason: null }],
+      },
+      {
+        id: 'chatcmpl-stream-1',
+        model: 'openai/gpt-4o-mini',
+        choices: [
+          { delta: { content: 'ce","age":30}' }, finishReason: 'stop' },
+        ],
+        usage: { promptTokens: 5, completionTokens: 9, totalTokens: 14 },
+      },
+    ]
+
+    setupMockSdkClient(streamChunks)
+    const adapter = createAdapter()
+
+    const outputSchema = {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        age: { type: 'number' },
+      },
+      required: ['name', 'age'],
+    }
+
+    const chunks: Array<StreamChunk> = []
+    for await (const chunk of adapter.structuredOutputStream({
+      chatOptions: {
+        model: 'openai/gpt-4o-mini',
+        messages: [{ role: 'user', content: 'Give me a person' }],
+        logger: testLogger,
+      },
+      outputSchema,
+    })) {
+      chunks.push(chunk)
+    }
+
+    // Single SDK call with stream:true + responseFormat
+    expect(mockSend).toHaveBeenCalledTimes(1)
+    const [rawParams] = mockSend.mock.calls[0]!
+    const params = rawParams.chatRequest
+    expect(params.stream).toBe(true)
+    expect(params.responseFormat).toEqual({
+      type: 'json_schema',
+      jsonSchema: {
+        name: 'structured_output',
+        schema: {
+          ...outputSchema,
+          additionalProperties: false,
+        },
+        strict: true,
+      },
+    })
+    expect(params.tools).toBeUndefined()
+
+    // Lifecycle events present and in the contractual order: consumers
+    // observing the CUSTOM `structured-output.complete` payload before
+    // RUN_FINISHED is part of the public contract; assert it.
+    const types: Array<string> = chunks.map((c) => c.type)
+    const idx = (t: string) => types.indexOf(t)
+    expect(idx('RUN_STARTED')).toBeGreaterThanOrEqual(0)
+    expect(idx('TEXT_MESSAGE_START')).toBeGreaterThan(idx('RUN_STARTED'))
+    expect(idx('TEXT_MESSAGE_CONTENT')).toBeGreaterThan(
+      idx('TEXT_MESSAGE_START'),
+    )
+    expect(idx('TEXT_MESSAGE_END')).toBeGreaterThan(idx('TEXT_MESSAGE_CONTENT'))
+    expect(idx('CUSTOM')).toBeGreaterThan(idx('TEXT_MESSAGE_END'))
+    expect(idx('RUN_FINISHED')).toBeGreaterThan(idx('CUSTOM'))
+
+    // Two CONTENT deltas — one per stream chunk — carrying raw JSON deltas
+    const contentChunks = chunks.filter(
+      (c): c is Extract<StreamChunk, { type: 'TEXT_MESSAGE_CONTENT' }> =>
+        c.type === 'TEXT_MESSAGE_CONTENT',
+    )
+    expect(contentChunks).toHaveLength(2)
+    expect(contentChunks[0]!.delta).toBe('{"name":"Ali')
+    expect(contentChunks[1]!.delta).toBe('ce","age":30}')
+
+    // Final CUSTOM event carries the parsed object + raw text
+    const customChunks = chunks.filter(
+      (c): c is Extract<StreamChunk, { type: 'CUSTOM' }> => c.type === 'CUSTOM',
+    )
+    expect(customChunks).toHaveLength(1)
+    expect(customChunks[0]!.name).toBe('structured-output.complete')
+    expect(customChunks[0]!.value).toEqual({
+      object: { name: 'Alice', age: 30 },
+      raw: '{"name":"Alice","age":30}',
+    })
+  })
+
+  it('emits RUN_ERROR when accumulated content is not valid JSON', async () => {
+    const streamChunks = [
+      {
+        id: 'chatcmpl-stream-bad',
+        model: 'openai/gpt-4o-mini',
+        choices: [{ delta: { content: 'not json' }, finishReason: 'stop' }],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      },
+    ]
+
+    setupMockSdkClient(streamChunks)
+    const adapter = createAdapter()
+
+    const chunks: Array<StreamChunk> = []
+    for await (const chunk of adapter.structuredOutputStream({
+      chatOptions: {
+        model: 'openai/gpt-4o-mini',
+        messages: [{ role: 'user', content: 'Give me a person' }],
+        logger: testLogger,
+      },
+      outputSchema: {
+        type: 'object',
+        properties: { name: { type: 'string' } },
+        required: ['name'],
+      },
+    })) {
+      chunks.push(chunk)
+    }
+
+    const errorChunks = chunks.filter((c) => c.type === 'RUN_ERROR')
+    expect(errorChunks).toHaveLength(1)
+    expect(errorChunks[0]).toMatchObject({
+      type: 'RUN_ERROR',
+      message: expect.stringContaining('Failed to parse structured output'),
+    })
+
+    const customChunks = chunks.filter((c) => c.type === 'CUSTOM')
+    expect(customChunks).toHaveLength(0)
+  })
+
+  it('emits empty-response RUN_ERROR when no content is streamed', async () => {
+    // No content delta, just a finish — mirrors a refused/truncated response.
+    const streamChunks = [
+      {
+        id: 'chatcmpl-stream-empty',
+        model: 'openai/gpt-4o-mini',
+        choices: [{ delta: { content: '' }, finishReason: 'stop' }],
+        usage: { promptTokens: 1, completionTokens: 0, totalTokens: 1 },
+      },
+    ]
+
+    setupMockSdkClient(streamChunks)
+    const adapter = createAdapter()
+
+    const chunks: Array<StreamChunk> = []
+    for await (const chunk of adapter.structuredOutputStream({
+      chatOptions: {
+        model: 'openai/gpt-4o-mini',
+        messages: [{ role: 'user', content: 'Give me a person' }],
+        logger: testLogger,
+      },
+      outputSchema: {
+        type: 'object',
+        properties: { name: { type: 'string' } },
+        required: ['name'],
+      },
+    })) {
+      chunks.push(chunk)
+    }
+
+    const errorChunks = chunks.filter((c) => c.type === 'RUN_ERROR')
+    expect(errorChunks).toHaveLength(1)
+    expect(errorChunks[0]).toMatchObject({
+      type: 'RUN_ERROR',
+      code: 'empty-response',
+    })
+    expect(chunks.filter((c) => c.type === 'CUSTOM')).toHaveLength(0)
+  })
+
+  it('finalizes the run when upstream stream closes without finishReason', async () => {
+    // Truncated SDK stream: deltas arrive but no finishReason. The adapter
+    // must still emit the terminal CUSTOM + RUN_FINISHED so consumers
+    // never hang waiting for completion.
+    const streamChunks = [
+      {
+        id: 'chatcmpl-stream-trunc',
+        model: 'openai/gpt-4o-mini',
+        choices: [
+          { delta: { content: '{"name":"Alice"}' }, finishReason: null },
+        ],
+      },
+    ]
+
+    setupMockSdkClient(streamChunks)
+    const adapter = createAdapter()
+
+    const chunks: Array<StreamChunk> = []
+    for await (const chunk of adapter.structuredOutputStream({
+      chatOptions: {
+        model: 'openai/gpt-4o-mini',
+        messages: [{ role: 'user', content: 'Give me a person' }],
+        logger: testLogger,
+      },
+      outputSchema: {
+        type: 'object',
+        properties: { name: { type: 'string' } },
+        required: ['name'],
+      },
+    })) {
+      chunks.push(chunk)
+    }
+
+    const customChunks = chunks.filter((c) => c.type === 'CUSTOM')
+    expect(customChunks).toHaveLength(1)
+    expect(customChunks[0]).toMatchObject({
+      name: 'structured-output.complete',
+      value: { object: { name: 'Alice' }, raw: '{"name":"Alice"}' },
+    })
+    expect(chunks.filter((c) => c.type === 'RUN_FINISHED')).toHaveLength(1)
+    expect(chunks.filter((c) => c.type === 'RUN_ERROR')).toHaveLength(0)
+  })
+
+  it('terminates on mid-stream provider error without emitting RUN_FINISHED', async () => {
+    const streamChunks = [
+      {
+        id: 'chatcmpl-stream-err',
+        model: 'openai/gpt-4o-mini',
+        choices: [{ delta: { content: '{"name":"Al' }, finishReason: null }],
+      },
+      {
+        id: 'chatcmpl-stream-err',
+        model: 'openai/gpt-4o-mini',
+        error: { message: 'Upstream rate limit', code: 429 },
+        choices: [],
+      },
+    ]
+
+    setupMockSdkClient(streamChunks)
+    const adapter = createAdapter()
+
+    const chunks: Array<StreamChunk> = []
+    for await (const chunk of adapter.structuredOutputStream({
+      chatOptions: {
+        model: 'openai/gpt-4o-mini',
+        messages: [{ role: 'user', content: 'Give me a person' }],
+        logger: testLogger,
+      },
+      outputSchema: {
+        type: 'object',
+        properties: { name: { type: 'string' } },
+        required: ['name'],
+      },
+    })) {
+      chunks.push(chunk)
+    }
+
+    const errorChunks = chunks.filter((c) => c.type === 'RUN_ERROR')
+    expect(errorChunks).toHaveLength(1)
+    // After RUN_ERROR the stream is terminal — no RUN_FINISHED, no CUSTOM.
+    expect(chunks.filter((c) => c.type === 'RUN_FINISHED')).toHaveLength(0)
+    expect(chunks.filter((c) => c.type === 'CUSTOM')).toHaveLength(0)
+  })
+
+  it('surfaces accumulated reasoning on the structured-output.complete event', async () => {
+    // Thinking-model stream: reasoning deltas before content. Consumers that
+    // subscribe only to the terminal CUSTOM event should still recover the
+    // chain-of-thought via `value.reasoning`.
+    const streamChunks = [
+      {
+        id: 'chatcmpl-stream-reasoning',
+        model: 'openai/gpt-4o-mini',
+        choices: [
+          {
+            delta: {
+              reasoningDetails: [
+                { type: 'reasoning.text', text: 'Let me think... ' },
+              ],
+            },
+            finishReason: null,
+          },
+        ],
+      },
+      {
+        id: 'chatcmpl-stream-reasoning',
+        model: 'openai/gpt-4o-mini',
+        choices: [
+          {
+            delta: {
+              reasoningDetails: [
+                { type: 'reasoning.text', text: 'a Strat would suit them.' },
+              ],
+            },
+            finishReason: null,
+          },
+        ],
+      },
+      {
+        id: 'chatcmpl-stream-reasoning',
+        model: 'openai/gpt-4o-mini',
+        choices: [
+          {
+            delta: { content: '{"name":"Strat","price":1299}' },
+            finishReason: 'stop',
+          },
+        ],
+      },
+    ]
+
+    setupMockSdkClient(streamChunks)
+    const adapter = createAdapter()
+
+    const chunks: Array<StreamChunk> = []
+    for await (const chunk of adapter.structuredOutputStream({
+      chatOptions: {
+        model: 'openai/gpt-4o-mini',
+        messages: [{ role: 'user', content: 'Recommend a guitar' }],
+        logger: testLogger,
+      },
+      outputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          price: { type: 'number' },
+        },
+        required: ['name', 'price'],
+      },
+    })) {
+      chunks.push(chunk)
+    }
+
+    const customChunks = chunks.filter(
+      (c): c is Extract<StreamChunk, { type: 'CUSTOM' }> => c.type === 'CUSTOM',
+    )
+    expect(customChunks).toHaveLength(1)
+    expect(customChunks[0]!.value).toEqual({
+      object: { name: 'Strat', price: 1299 },
+      raw: '{"name":"Strat","price":1299}',
+      reasoning: 'Let me think... a Strat would suit them.',
+    })
+  })
+
+  it('omits reasoning from the CUSTOM event when none was streamed', async () => {
+    // Non-thinking model: no reasoning deltas. The `reasoning` field should
+    // be absent (not an empty string) so downstream consumers can branch on
+    // `value.reasoning != null` without false positives.
+    const streamChunks = [
+      {
+        id: 'chatcmpl-stream-noreasoning',
+        model: 'openai/gpt-4o-mini',
+        choices: [
+          {
+            delta: { content: '{"name":"Strat","price":1299}' },
+            finishReason: 'stop',
+          },
+        ],
+      },
+    ]
+
+    setupMockSdkClient(streamChunks)
+    const adapter = createAdapter()
+
+    const chunks: Array<StreamChunk> = []
+    for await (const chunk of adapter.structuredOutputStream({
+      chatOptions: {
+        model: 'openai/gpt-4o-mini',
+        messages: [{ role: 'user', content: 'Recommend a guitar' }],
+        logger: testLogger,
+      },
+      outputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          price: { type: 'number' },
+        },
+        required: ['name', 'price'],
+      },
+    })) {
+      chunks.push(chunk)
+    }
+
+    const customChunks = chunks.filter(
+      (c): c is Extract<StreamChunk, { type: 'CUSTOM' }> => c.type === 'CUSTOM',
+    )
+    expect(customChunks).toHaveLength(1)
+    expect(customChunks[0]!.value).not.toHaveProperty('reasoning')
+  })
+})

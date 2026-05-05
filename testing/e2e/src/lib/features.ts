@@ -49,6 +49,10 @@ export const featureConfigs: Record<Feature, FeatureConfig> = {
     tools: [],
     modelOptions: {},
   },
+  'structured-output-stream': {
+    tools: [],
+    modelOptions: {},
+  },
   'agentic-structured': {
     tools: [getGuitars],
     modelOptions: {},

@@ -19,6 +19,7 @@ export type Feature =
   | 'tool-approval'
   | 'text-tool-text'
   | 'structured-output'
+  | 'structured-output-stream'
   | 'agentic-structured'
   | 'multimodal-image'
   | 'multimodal-structured'
@@ -49,6 +50,7 @@ export const ALL_FEATURES: Feature[] = [
   'tool-approval',
   'text-tool-text',
   'structured-output',
+  'structured-output-stream',
   'agentic-structured',
   'multimodal-image',
   'multimodal-structured',

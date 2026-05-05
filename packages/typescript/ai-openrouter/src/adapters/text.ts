@@ -81,7 +81,7 @@ interface AGUIState {
   hasEmittedRunStarted: boolean
   hasEmittedTextMessageStart: boolean
   hasEmittedTextMessageEnd: boolean
-  hasEmittedRunFinished: boolean
+  hasFinalizedChoice: boolean
   hasEmittedStepStarted: boolean
   deferredUsage:
     | { promptTokens: number; completionTokens: number; totalTokens: number }
@@ -131,7 +131,7 @@ export class OpenRouterTextAdapter<
       hasEmittedRunStarted: false,
       hasEmittedTextMessageStart: false,
       hasEmittedTextMessageEnd: false,
-      hasEmittedRunFinished: false,
+      hasFinalizedChoice: false,
       hasEmittedStepStarted: false,
       deferredUsage: undefined,
       computedFinishReason: undefined,
@@ -204,7 +204,7 @@ export class OpenRouterTextAdapter<
 
       // Emit RUN_FINISHED after the stream ends so we capture usage from
       // any chunk (some SDKs send usage on a separate trailing chunk).
-      if (aguiState.hasEmittedRunFinished && aguiState.computedFinishReason) {
+      if (aguiState.hasFinalizedChoice && aguiState.computedFinishReason) {
         yield asChunk({
           type: 'RUN_FINISHED',
           runId: aguiState.runId,
@@ -254,6 +254,272 @@ export class OpenRouterTextAdapter<
         type: 'RUN_ERROR',
         runId: aguiState.runId,
         model: options.model,
+        timestamp,
+        message: (error as Error).message || 'Unknown error',
+        error: {
+          message: (error as Error).message || 'Unknown error',
+        },
+      })
+    }
+  }
+
+  async *structuredOutputStream(
+    options: StructuredOutputOptions<ResolveProviderOptions<TModel>>,
+  ): AsyncIterable<StreamChunk> {
+    const { chatOptions, outputSchema } = options
+    const { logger } = chatOptions
+    const timestamp = Date.now()
+    const toolCallBuffers = new Map<number, ToolCallBuffer>()
+    let accumulatedReasoning = ''
+    let accumulatedContent = ''
+    let responseId: string | null = null
+    let currentModel = chatOptions.model
+    const aguiState: AGUIState = {
+      runId: chatOptions.runId ?? this.generateId(),
+      threadId: chatOptions.threadId ?? this.generateId(),
+      messageId: this.generateId(),
+      stepId: null,
+      reasoningMessageId: null,
+      hasClosedReasoning: false,
+      hasEmittedRunStarted: false,
+      hasEmittedTextMessageStart: false,
+      hasEmittedTextMessageEnd: false,
+      hasFinalizedChoice: false,
+      hasEmittedStepStarted: false,
+      deferredUsage: undefined,
+      computedFinishReason: undefined,
+    }
+
+    const strictSchema = convertSchemaToJsonSchema(outputSchema, {
+      forStructuredOutput: true,
+    })
+
+    try {
+      // Strip tools — structured-output mode shouldn't mix tool calls into the
+      // request body. Matches the non-streaming `structuredOutput` behavior.
+      const { tools: _tools, ...baseParams } =
+        this.mapTextOptionsToSDK(chatOptions)
+      logger.request(
+        `activity=structured-stream provider=openrouter model=${this.model} messages=${chatOptions.messages.length} stream=true`,
+        { provider: 'openrouter', model: this.model },
+      )
+      const stream = await this.client.chat.send(
+        {
+          chatRequest: {
+            ...baseParams,
+            stream: true,
+            responseFormat: {
+              type: 'json_schema',
+              jsonSchema: {
+                name: 'structured_output',
+                schema: strictSchema,
+                strict: true,
+              },
+            },
+          },
+        },
+        { signal: chatOptions.request?.signal },
+      )
+
+      for await (const chunk of stream) {
+        logger.provider(`provider=openrouter`, { chunk })
+        if (chunk.id) responseId = chunk.id
+        if (chunk.model) currentModel = chunk.model
+
+        if (!aguiState.hasEmittedRunStarted) {
+          aguiState.hasEmittedRunStarted = true
+          yield asChunk({
+            type: 'RUN_STARTED',
+            runId: aguiState.runId,
+            threadId: aguiState.threadId,
+            model: currentModel || chatOptions.model,
+            timestamp,
+          })
+        }
+
+        if (chunk.error) {
+          // Provider error mid-stream is terminal: emit RUN_ERROR and stop.
+          // Continuing risks emitting RUN_FINISHED after RUN_ERROR.
+          yield asChunk({
+            type: 'RUN_ERROR',
+            runId: aguiState.runId,
+            model: currentModel || chatOptions.model,
+            timestamp,
+            message: chunk.error.message || 'Unknown error',
+            code: String(chunk.error.code),
+            error: {
+              message: chunk.error.message || 'Unknown error',
+              code: String(chunk.error.code),
+            },
+          })
+          return
+        }
+
+        for (const choice of chunk.choices) {
+          yield* this.processChoice(
+            choice,
+            toolCallBuffers,
+            {
+              id: responseId || this.generateId(),
+              model: currentModel,
+              timestamp,
+            },
+            { reasoning: accumulatedReasoning, content: accumulatedContent },
+            (r, c) => {
+              accumulatedReasoning = r
+              accumulatedContent = c
+            },
+            chunk.usage,
+            aguiState,
+          )
+        }
+      }
+
+      // Finalize the run unconditionally. If the upstream stream closed
+      // without a finishReason (truncation, transport drop), processChoice
+      // never closed reasoning/text or computed a finish reason — we still
+      // owe consumers a CUSTOM + RUN_FINISHED (or RUN_ERROR), never silence.
+      const resolvedModel = currentModel || chatOptions.model
+
+      if (aguiState.reasoningMessageId && !aguiState.hasClosedReasoning) {
+        aguiState.hasClosedReasoning = true
+        yield asChunk({
+          type: 'REASONING_MESSAGE_END',
+          messageId: aguiState.reasoningMessageId,
+          model: resolvedModel,
+          timestamp,
+        })
+        yield asChunk({
+          type: 'REASONING_END',
+          messageId: aguiState.reasoningMessageId,
+          model: resolvedModel,
+          timestamp,
+        })
+        if (aguiState.stepId) {
+          yield asChunk({
+            type: 'STEP_FINISHED',
+            stepName: aguiState.stepId,
+            stepId: aguiState.stepId,
+            model: resolvedModel,
+            timestamp,
+            content: accumulatedReasoning,
+          })
+        }
+      }
+
+      if (
+        aguiState.hasEmittedTextMessageStart &&
+        !aguiState.hasEmittedTextMessageEnd
+      ) {
+        aguiState.hasEmittedTextMessageEnd = true
+        yield asChunk({
+          type: 'TEXT_MESSAGE_END',
+          messageId: aguiState.messageId,
+          model: resolvedModel,
+          timestamp,
+        })
+      }
+
+      if (!accumulatedContent) {
+        // Mirrors the non-streaming `structuredOutput` empty-content error so
+        // refused/truncated responses surface as failures, not `null` data.
+        const message = 'Structured output response contained no content'
+        logger.errors(message, {
+          source: 'openrouter.structuredOutputStream',
+        })
+        yield asChunk({
+          type: 'RUN_ERROR',
+          runId: aguiState.runId,
+          model: resolvedModel,
+          timestamp,
+          message,
+          code: 'empty-response',
+          error: { message, code: 'empty-response' },
+        })
+        return
+      }
+
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(accumulatedContent)
+      } catch (parseError) {
+        const message =
+          parseError instanceof SyntaxError
+            ? `Failed to parse structured output as JSON: ${parseError.message}`
+            : 'Failed to parse structured output as JSON'
+        logger.errors(message, {
+          source: 'openrouter.structuredOutputStream',
+          error: parseError,
+        })
+        yield asChunk({
+          type: 'RUN_ERROR',
+          runId: aguiState.runId,
+          model: resolvedModel,
+          timestamp,
+          message,
+          code: 'parse-error',
+          error: { message, code: 'parse-error' },
+        })
+        return
+      }
+
+      yield asChunk({
+        type: 'CUSTOM',
+        name: 'structured-output.complete',
+        value: {
+          object: parsed,
+          raw: accumulatedContent,
+          // Surface accumulated chain-of-thought (if any) on the terminal
+          // event so consumers that only subscribe to the final result can
+          // still recover what the model thought through to get there.
+          ...(accumulatedReasoning ? { reasoning: accumulatedReasoning } : {}),
+        },
+        model: resolvedModel,
+        timestamp,
+      })
+
+      yield asChunk({
+        type: 'RUN_FINISHED',
+        runId: aguiState.runId,
+        threadId: aguiState.threadId,
+        model: resolvedModel,
+        timestamp,
+        usage: aguiState.deferredUsage,
+        finishReason: aguiState.computedFinishReason ?? 'stop',
+      })
+    } catch (error) {
+      logger.errors('openrouter.structuredOutputStream fatal', {
+        error,
+        source: 'openrouter.structuredOutputStream',
+      })
+      if (!aguiState.hasEmittedRunStarted) {
+        aguiState.hasEmittedRunStarted = true
+        yield asChunk({
+          type: 'RUN_STARTED',
+          runId: aguiState.runId,
+          threadId: aguiState.threadId,
+          model: chatOptions.model,
+          timestamp,
+        })
+      }
+
+      if (error instanceof RequestAbortedError) {
+        yield asChunk({
+          type: 'RUN_ERROR',
+          runId: aguiState.runId,
+          model: chatOptions.model,
+          timestamp,
+          message: 'Request aborted',
+          code: 'aborted',
+          error: { message: 'Request aborted', code: 'aborted' },
+        })
+        return
+      }
+
+      yield asChunk({
+        type: 'RUN_ERROR',
+        runId: aguiState.runId,
+        model: chatOptions.model,
         timestamp,
         message: (error as Error).message || 'Unknown error',
         error: {
@@ -578,8 +844,8 @@ export class OpenRouterTextAdapter<
       // send two chunks with finishReason (one for the finish, one carrying
       // usage data).  Without this guard TEXT_MESSAGE_END and RUN_FINISHED
       // would be emitted twice.
-      if (!aguiState.hasEmittedRunFinished) {
-        aguiState.hasEmittedRunFinished = true
+      if (!aguiState.hasFinalizedChoice) {
+        aguiState.hasFinalizedChoice = true
 
         // Emit all completed tool calls when finish reason indicates tool usage
         if (finishReason === 'tool_calls' || toolCallBuffers.size > 0) {

@@ -80,6 +80,10 @@ export const matrix: Record<Feature, Set<Provider>> = {
     'grok',
     'openrouter',
   ]),
+  // Streaming structured output: only providers with native streaming JSON
+  // schema support are listed here. Other providers fall back to the default
+  // BaseTextAdapter implementation but aren't exercised by E2E yet.
+  'structured-output-stream': new Set(['openrouter']),
   'agentic-structured': new Set([
     'openai',
     'anthropic',
