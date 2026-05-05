@@ -1,3 +1,4 @@
+import { APIUserAbortError } from 'openai'
 import { BaseTextAdapter } from '@tanstack/ai/adapters'
 import { validateTextProviderOptions } from '../text/text-provider-options'
 import { convertToolsToProviderFormat } from '../tools'
@@ -220,6 +221,263 @@ export class GrokTextAdapter<
         source: 'grok.structuredOutput',
       })
       throw error
+    }
+  }
+
+  /**
+   * Stream structured output via a single Chat Completions request with
+   * `stream: true` + `response_format: json_schema`. Emits raw JSON deltas as
+   * `TEXT_MESSAGE_CONTENT` chunks and a terminal `CUSTOM`
+   * `structured-output.complete` event with `{ object, raw }`.
+   */
+  async *structuredOutputStream(
+    options: StructuredOutputOptions<GrokTextProviderOptions>,
+  ): AsyncIterable<StreamChunk> {
+    const { chatOptions, outputSchema } = options
+    const { logger } = chatOptions
+    const timestamp = Date.now()
+    const aguiState = {
+      runId: chatOptions.runId ?? generateId(this.name),
+      threadId: chatOptions.threadId ?? generateId(this.name),
+      messageId: generateId(this.name),
+      timestamp,
+      hasEmittedRunStarted: false,
+      hasEmittedTextMessageStart: false,
+      hasEmittedTextMessageEnd: false,
+      hasFinalizedChoice: false,
+      deferredUsage: undefined as
+        | { promptTokens: number; completionTokens: number; totalTokens: number }
+        | undefined,
+      computedFinishReason: undefined as string | undefined,
+    }
+
+    const strictSchema = makeGrokStructuredOutputCompatible(
+      outputSchema,
+      outputSchema.required || [],
+    )
+
+    let accumulatedContent = ''
+    let currentModel = chatOptions.model
+
+    try {
+      // Strip tools — structured-output mode shouldn't mix tool calls into the
+      // request body. Matches the non-streaming `structuredOutput` behavior.
+      const { tools: _tools, ...baseParams } =
+        this.mapTextOptionsToGrok(chatOptions)
+      logger.request(
+        `activity=structured-stream provider=grok model=${this.model} messages=${chatOptions.messages.length} stream=true`,
+        { provider: 'grok', model: this.model },
+      )
+      const stream = await this.client.chat.completions.create(
+        {
+          ...baseParams,
+          stream: true,
+          response_format: {
+            type: 'json_schema',
+            json_schema: {
+              name: 'structured_output',
+              schema: strictSchema,
+              strict: true,
+            },
+          },
+        },
+        { signal: chatOptions.request?.signal },
+      )
+
+      for await (const chunk of stream) {
+        logger.provider(`provider=grok`, { chunk })
+        if (chunk.model) currentModel = chunk.model
+
+        if (!aguiState.hasEmittedRunStarted) {
+          aguiState.hasEmittedRunStarted = true
+          yield asChunk({
+            type: 'RUN_STARTED',
+            runId: aguiState.runId,
+            threadId: aguiState.threadId,
+            model: currentModel || chatOptions.model,
+            timestamp,
+          })
+        }
+
+        const choice = chunk.choices[0]
+        if (!choice) continue
+
+        const deltaContent = choice.delta.content
+        if (deltaContent) {
+          if (!aguiState.hasEmittedTextMessageStart) {
+            aguiState.hasEmittedTextMessageStart = true
+            yield asChunk({
+              type: 'TEXT_MESSAGE_START',
+              messageId: aguiState.messageId,
+              model: currentModel || chatOptions.model,
+              timestamp,
+              role: 'assistant',
+            })
+          }
+
+          accumulatedContent += deltaContent
+
+          yield asChunk({
+            type: 'TEXT_MESSAGE_CONTENT',
+            messageId: aguiState.messageId,
+            model: currentModel || chatOptions.model,
+            timestamp,
+            delta: deltaContent,
+            content: accumulatedContent,
+          })
+        }
+
+        if (choice.finish_reason) {
+          if (chunk.usage) {
+            aguiState.deferredUsage = {
+              promptTokens: chunk.usage.prompt_tokens || 0,
+              completionTokens: chunk.usage.completion_tokens || 0,
+              totalTokens: chunk.usage.total_tokens || 0,
+            }
+          }
+
+          if (!aguiState.hasFinalizedChoice) {
+            aguiState.hasFinalizedChoice = true
+            aguiState.computedFinishReason =
+              choice.finish_reason === 'length' ? 'length' : 'stop'
+
+            if (
+              aguiState.hasEmittedTextMessageStart &&
+              !aguiState.hasEmittedTextMessageEnd
+            ) {
+              aguiState.hasEmittedTextMessageEnd = true
+              yield asChunk({
+                type: 'TEXT_MESSAGE_END',
+                messageId: aguiState.messageId,
+                model: currentModel || chatOptions.model,
+                timestamp,
+              })
+            }
+          }
+        }
+      }
+
+      // Finalize the run unconditionally. If the upstream stream closed
+      // without a finishReason, we never emitted TEXT_MESSAGE_END or computed
+      // a finish reason — we still owe consumers a CUSTOM + RUN_FINISHED (or
+      // RUN_ERROR), never silence.
+      const resolvedModel = currentModel || chatOptions.model
+
+      if (
+        aguiState.hasEmittedTextMessageStart &&
+        !aguiState.hasEmittedTextMessageEnd
+      ) {
+        aguiState.hasEmittedTextMessageEnd = true
+        yield asChunk({
+          type: 'TEXT_MESSAGE_END',
+          messageId: aguiState.messageId,
+          model: resolvedModel,
+          timestamp,
+        })
+      }
+
+      if (!accumulatedContent) {
+        const message = 'Structured output response contained no content'
+        logger.errors(message, {
+          source: 'grok.structuredOutputStream',
+        })
+        yield asChunk({
+          type: 'RUN_ERROR',
+          runId: aguiState.runId,
+          model: resolvedModel,
+          timestamp,
+          message,
+          code: 'empty-response',
+          error: { message, code: 'empty-response' },
+        })
+        return
+      }
+
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(accumulatedContent)
+      } catch (parseError) {
+        const message =
+          parseError instanceof SyntaxError
+            ? `Failed to parse structured output as JSON: ${parseError.message}`
+            : 'Failed to parse structured output as JSON'
+        logger.errors(message, {
+          source: 'grok.structuredOutputStream',
+          error: parseError,
+        })
+        yield asChunk({
+          type: 'RUN_ERROR',
+          runId: aguiState.runId,
+          model: resolvedModel,
+          timestamp,
+          message,
+          code: 'parse-error',
+          error: { message, code: 'parse-error' },
+        })
+        return
+      }
+
+      const transformed = transformNullsToUndefined(parsed)
+
+      yield asChunk({
+        type: 'CUSTOM',
+        name: 'structured-output.complete',
+        value: {
+          object: transformed,
+          raw: accumulatedContent,
+        },
+        model: resolvedModel,
+        timestamp,
+      })
+
+      yield asChunk({
+        type: 'RUN_FINISHED',
+        runId: aguiState.runId,
+        threadId: aguiState.threadId,
+        model: resolvedModel,
+        timestamp,
+        usage: aguiState.deferredUsage,
+        finishReason: aguiState.computedFinishReason ?? 'stop',
+      })
+    } catch (error) {
+      logger.errors('grok.structuredOutputStream fatal', {
+        error,
+        source: 'grok.structuredOutputStream',
+      })
+      if (!aguiState.hasEmittedRunStarted) {
+        aguiState.hasEmittedRunStarted = true
+        yield asChunk({
+          type: 'RUN_STARTED',
+          runId: aguiState.runId,
+          threadId: aguiState.threadId,
+          model: chatOptions.model,
+          timestamp,
+        })
+      }
+
+      if (error instanceof APIUserAbortError) {
+        yield asChunk({
+          type: 'RUN_ERROR',
+          runId: aguiState.runId,
+          model: chatOptions.model,
+          timestamp,
+          message: 'Request aborted',
+          code: 'aborted',
+          error: { message: 'Request aborted', code: 'aborted' },
+        })
+        return
+      }
+
+      const err = error as Error & { code?: string }
+      yield asChunk({
+        type: 'RUN_ERROR',
+        runId: aguiState.runId,
+        model: chatOptions.model,
+        timestamp,
+        message: err.message || 'Unknown error',
+        code: err.code,
+        error: { message: err.message || 'Unknown error', code: err.code },
+      })
     }
   }
 

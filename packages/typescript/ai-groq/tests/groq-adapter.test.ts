@@ -19,6 +19,12 @@ let mockCreate: Mock<(...args: Array<unknown>) => unknown>
 
 // Mock the Groq SDK
 vi.mock('groq-sdk', () => {
+  class APIUserAbortError extends Error {
+    constructor() {
+      super('Request aborted')
+      this.name = 'APIUserAbortError'
+    }
+  }
   return {
     default: class {
       chat = {
@@ -27,6 +33,7 @@ vi.mock('groq-sdk', () => {
         },
       }
     },
+    APIUserAbortError,
   }
 })
 
@@ -584,5 +591,336 @@ describe('Groq AG-UI event emission', () => {
       expect(secondContent.delta).toBe('world')
       expect(secondContent.content).toBe('Hello world')
     }
+  })
+})
+
+describe('Groq structuredOutputStream', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  const createAdapter = () =>
+    createGroqText('llama-3.3-70b-versatile', 'test-api-key')
+
+  it('issues a single streaming request with response_format json_schema and emits parsed object', async () => {
+    const streamChunks = [
+      {
+        id: 'chatcmpl-stream-1',
+        model: 'llama-3.3-70b-versatile',
+        choices: [
+          { delta: { content: '{"name":"Ali' }, finish_reason: null },
+        ],
+      },
+      {
+        id: 'chatcmpl-stream-1',
+        model: 'llama-3.3-70b-versatile',
+        choices: [
+          { delta: { content: 'ce","age":30}' }, finish_reason: 'stop' },
+        ],
+        x_groq: {
+          usage: {
+            prompt_tokens: 5,
+            completion_tokens: 9,
+            total_tokens: 14,
+          },
+        },
+      },
+    ]
+
+    setupMockSdkClient(streamChunks)
+    const adapter = createAdapter()
+
+    const outputSchema = {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        age: { type: 'number' },
+      },
+      required: ['name', 'age'],
+    }
+
+    const chunks: Array<StreamChunk> = []
+    for await (const chunk of adapter.structuredOutputStream({
+      chatOptions: {
+        model: 'llama-3.3-70b-versatile',
+        messages: [{ role: 'user', content: 'Give me a person' }],
+        logger: testLogger,
+      },
+      outputSchema,
+    })) {
+      chunks.push(chunk)
+    }
+
+    expect(mockCreate).toHaveBeenCalledTimes(1)
+    const [params] = mockCreate.mock.calls[0]! as Array<any>
+    expect(params.stream).toBe(true)
+    expect(params.response_format).toEqual({
+      type: 'json_schema',
+      json_schema: {
+        name: 'structured_output',
+        schema: expect.objectContaining({
+          type: 'object',
+          additionalProperties: false,
+        }),
+        strict: true,
+      },
+    })
+    expect(params.tools).toBeUndefined()
+
+    const types: Array<string> = chunks.map((c) => c.type)
+    const idx = (t: string) => types.indexOf(t)
+    expect(idx('RUN_STARTED')).toBeGreaterThanOrEqual(0)
+    expect(idx('TEXT_MESSAGE_START')).toBeGreaterThan(idx('RUN_STARTED'))
+    expect(idx('TEXT_MESSAGE_CONTENT')).toBeGreaterThan(
+      idx('TEXT_MESSAGE_START'),
+    )
+    expect(idx('TEXT_MESSAGE_END')).toBeGreaterThan(idx('TEXT_MESSAGE_CONTENT'))
+    expect(idx('CUSTOM')).toBeGreaterThan(idx('TEXT_MESSAGE_END'))
+    expect(idx('RUN_FINISHED')).toBeGreaterThan(idx('CUSTOM'))
+
+    const contentChunks = chunks.filter(
+      (c): c is Extract<StreamChunk, { type: 'TEXT_MESSAGE_CONTENT' }> =>
+        c.type === 'TEXT_MESSAGE_CONTENT',
+    )
+    expect(contentChunks).toHaveLength(2)
+    expect(contentChunks[0]!.delta).toBe('{"name":"Ali')
+    expect(contentChunks[1]!.delta).toBe('ce","age":30}')
+
+    const customChunks = chunks.filter(
+      (c): c is Extract<StreamChunk, { type: 'CUSTOM' }> => c.type === 'CUSTOM',
+    )
+    expect(customChunks).toHaveLength(1)
+    expect(customChunks[0]!.name).toBe('structured-output.complete')
+    expect(customChunks[0]!.value).toEqual({
+      object: { name: 'Alice', age: 30 },
+      raw: '{"name":"Alice","age":30}',
+    })
+  })
+
+  it('emits RUN_ERROR when accumulated content is not valid JSON', async () => {
+    const streamChunks = [
+      {
+        id: 'chatcmpl-bad',
+        model: 'llama-3.3-70b-versatile',
+        choices: [{ delta: { content: 'not json' }, finish_reason: 'stop' }],
+        x_groq: {
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        },
+      },
+    ]
+
+    setupMockSdkClient(streamChunks)
+    const adapter = createAdapter()
+
+    const chunks: Array<StreamChunk> = []
+    for await (const chunk of adapter.structuredOutputStream({
+      chatOptions: {
+        model: 'llama-3.3-70b-versatile',
+        messages: [{ role: 'user', content: 'Give me a person' }],
+        logger: testLogger,
+      },
+      outputSchema: {
+        type: 'object',
+        properties: { name: { type: 'string' } },
+        required: ['name'],
+      },
+    })) {
+      chunks.push(chunk)
+    }
+
+    const errorChunks = chunks.filter((c) => c.type === 'RUN_ERROR')
+    expect(errorChunks).toHaveLength(1)
+    expect(errorChunks[0]).toMatchObject({
+      type: 'RUN_ERROR',
+      code: 'parse-error',
+      message: expect.stringContaining('Failed to parse structured output'),
+    })
+    expect(chunks.filter((c) => c.type === 'CUSTOM')).toHaveLength(0)
+  })
+
+  it('emits empty-response RUN_ERROR when no content is streamed', async () => {
+    const streamChunks = [
+      {
+        id: 'chatcmpl-empty',
+        model: 'llama-3.3-70b-versatile',
+        choices: [{ delta: { content: '' }, finish_reason: 'stop' }],
+        x_groq: {
+          usage: { prompt_tokens: 1, completion_tokens: 0, total_tokens: 1 },
+        },
+      },
+    ]
+
+    setupMockSdkClient(streamChunks)
+    const adapter = createAdapter()
+
+    const chunks: Array<StreamChunk> = []
+    for await (const chunk of adapter.structuredOutputStream({
+      chatOptions: {
+        model: 'llama-3.3-70b-versatile',
+        messages: [{ role: 'user', content: 'Give me a person' }],
+        logger: testLogger,
+      },
+      outputSchema: {
+        type: 'object',
+        properties: { name: { type: 'string' } },
+        required: ['name'],
+      },
+    })) {
+      chunks.push(chunk)
+    }
+
+    const errorChunks = chunks.filter((c) => c.type === 'RUN_ERROR')
+    expect(errorChunks).toHaveLength(1)
+    expect(errorChunks[0]).toMatchObject({
+      type: 'RUN_ERROR',
+      code: 'empty-response',
+    })
+    expect(chunks.filter((c) => c.type === 'CUSTOM')).toHaveLength(0)
+  })
+
+  it('finalizes the run when upstream stream closes without finish_reason', async () => {
+    const streamChunks = [
+      {
+        id: 'chatcmpl-trunc',
+        model: 'llama-3.3-70b-versatile',
+        choices: [
+          { delta: { content: '{"name":"Alice"}' }, finish_reason: null },
+        ],
+      },
+    ]
+
+    setupMockSdkClient(streamChunks)
+    const adapter = createAdapter()
+
+    const chunks: Array<StreamChunk> = []
+    for await (const chunk of adapter.structuredOutputStream({
+      chatOptions: {
+        model: 'llama-3.3-70b-versatile',
+        messages: [{ role: 'user', content: 'Give me a person' }],
+        logger: testLogger,
+      },
+      outputSchema: {
+        type: 'object',
+        properties: { name: { type: 'string' } },
+        required: ['name'],
+      },
+    })) {
+      chunks.push(chunk)
+    }
+
+    const customChunks = chunks.filter((c) => c.type === 'CUSTOM')
+    expect(customChunks).toHaveLength(1)
+    expect(customChunks[0]).toMatchObject({
+      name: 'structured-output.complete',
+      value: { object: { name: 'Alice' }, raw: '{"name":"Alice"}' },
+    })
+    expect(chunks.filter((c) => c.type === 'RUN_FINISHED')).toHaveLength(1)
+    expect(chunks.filter((c) => c.type === 'RUN_ERROR')).toHaveLength(0)
+  })
+
+  it('terminates on iterator-thrown provider error without emitting RUN_FINISHED', async () => {
+    // Groq surfaces in-stream provider errors as iterator throws (not inline
+    // error chunks), so the test mirrors that contract.
+    mockCreate = vi.fn().mockImplementation(() => {
+      const chunks = [
+        {
+          id: 'chatcmpl-err',
+          model: 'llama-3.3-70b-versatile',
+          choices: [
+            { delta: { content: '{"name":"Al' }, finish_reason: null },
+          ],
+        },
+      ] as Array<unknown>
+      return Promise.resolve({
+        [Symbol.asyncIterator]() {
+          let i = 0
+          return {
+            // eslint-disable-next-line @typescript-eslint/require-await
+            async next() {
+              if (i < chunks.length) return { value: chunks[i++], done: false }
+              throw Object.assign(new Error('Upstream rate limit'), {
+                code: '429',
+              })
+            },
+          }
+        },
+      })
+    })
+    const adapter = createAdapter()
+
+    const chunks: Array<StreamChunk> = []
+    for await (const chunk of adapter.structuredOutputStream({
+      chatOptions: {
+        model: 'llama-3.3-70b-versatile',
+        messages: [{ role: 'user', content: 'Give me a person' }],
+        logger: testLogger,
+      },
+      outputSchema: {
+        type: 'object',
+        properties: { name: { type: 'string' } },
+        required: ['name'],
+      },
+    })) {
+      chunks.push(chunk)
+    }
+
+    const errorChunks = chunks.filter((c) => c.type === 'RUN_ERROR')
+    expect(errorChunks).toHaveLength(1)
+    expect(chunks.filter((c) => c.type === 'RUN_FINISHED')).toHaveLength(0)
+    expect(chunks.filter((c) => c.type === 'CUSTOM')).toHaveLength(0)
+  })
+
+  it('transforms null values to undefined on the parsed object', async () => {
+    const streamChunks = [
+      {
+        id: 'chatcmpl-null',
+        model: 'llama-3.3-70b-versatile',
+        choices: [
+          {
+            delta: { content: '{"name":"Alice","nickname":null}' },
+            finish_reason: 'stop',
+          },
+        ],
+        x_groq: {
+          usage: { prompt_tokens: 5, completion_tokens: 9, total_tokens: 14 },
+        },
+      },
+    ]
+
+    setupMockSdkClient(streamChunks)
+    const adapter = createAdapter()
+
+    const chunks: Array<StreamChunk> = []
+    for await (const chunk of adapter.structuredOutputStream({
+      chatOptions: {
+        model: 'llama-3.3-70b-versatile',
+        messages: [{ role: 'user', content: 'Give me a person' }],
+        logger: testLogger,
+      },
+      outputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          nickname: { type: ['string', 'null'] },
+        },
+        required: ['name', 'nickname'],
+      },
+    })) {
+      chunks.push(chunk)
+    }
+
+    const customChunks = chunks.filter(
+      (c): c is Extract<StreamChunk, { type: 'CUSTOM' }> => c.type === 'CUSTOM',
+    )
+    expect(customChunks).toHaveLength(1)
+    // nickname becomes undefined (not present) after transform — matches the
+    // non-streaming structuredOutput contract.
+    const value = customChunks[0]!.value as { object: Record<string, unknown> }
+    expect(value.object.name).toBe('Alice')
+    expect(value.object.nickname).toBeUndefined()
+    // Raw JSON preserves the original null
+    expect((customChunks[0]!.value as { raw: string }).raw).toBe(
+      '{"name":"Alice","nickname":null}',
+    )
   })
 })

@@ -1,3 +1,4 @@
+import { APIUserAbortError } from 'openai'
 import { BaseTextAdapter } from '@tanstack/ai/adapters'
 import { toRunErrorPayload } from '@tanstack/ai/adapter-internals'
 import { validateTextProviderOptions } from '../text/text-provider-options'
@@ -248,6 +249,293 @@ export class OpenAITextAdapter<
         source: 'openai.structuredOutput',
       })
       throw error
+    }
+  }
+
+  /**
+   * Stream structured output via a single Responses API request with
+   * `stream: true` + `text.format: json_schema`. Emits raw JSON deltas as
+   * `TEXT_MESSAGE_CONTENT` chunks and a terminal `CUSTOM`
+   * `structured-output.complete` event with `{ object, raw }`.
+   */
+  async *structuredOutputStream(
+    options: StructuredOutputOptions<TProviderOptions>,
+  ): AsyncIterable<StreamChunk> {
+    const { chatOptions, outputSchema } = options
+    const { logger } = chatOptions
+    const timestamp = Date.now()
+    const runId = chatOptions.runId ?? generateId(this.name)
+    const threadId = chatOptions.threadId ?? generateId(this.name)
+    const messageId = generateId(this.name)
+    let hasEmittedRunStarted = false
+    let hasEmittedTextMessageStart = false
+    let accumulatedContent = ''
+    let model: string = chatOptions.model
+    let usage:
+      | { promptTokens: number; completionTokens: number; totalTokens: number }
+      | undefined
+    let finishReason: string | undefined
+
+    const jsonSchema = makeOpenAIStructuredOutputCompatible(
+      outputSchema,
+      outputSchema.required || [],
+    )
+
+    try {
+      // Strip tools — structured-output mode shouldn't mix tool calls into the
+      // request body. Matches the non-streaming `structuredOutput` behavior.
+      const { tools: _tools, ...baseParams } =
+        this.mapTextOptionsToOpenAI(chatOptions)
+      logger.request(
+        `activity=structured-stream provider=openai model=${this.model} messages=${chatOptions.messages.length} stream=true`,
+        { provider: 'openai', model: this.model },
+      )
+      const stream = await this.client.responses.create(
+        {
+          ...baseParams,
+          stream: true,
+          text: {
+            format: {
+              type: 'json_schema',
+              name: 'structured_output',
+              schema: jsonSchema,
+              strict: true,
+            },
+          },
+        },
+        {
+          headers: chatOptions.request?.headers,
+          signal: chatOptions.request?.signal,
+        },
+      )
+
+      for await (const chunk of stream) {
+        logger.provider(`provider=openai type=${chunk.type}`, { chunk })
+
+        if (!hasEmittedRunStarted) {
+          hasEmittedRunStarted = true
+          yield asChunk({
+            type: 'RUN_STARTED',
+            runId,
+            threadId,
+            model,
+            timestamp,
+          })
+        }
+
+        if (
+          chunk.type === 'response.created' ||
+          chunk.type === 'response.in_progress'
+        ) {
+          model = chunk.response.model
+        }
+
+        if (chunk.type === 'response.failed' || chunk.type === 'error') {
+          const message =
+            chunk.type === 'error'
+              ? chunk.message
+              : (chunk.response.error?.message ?? 'OpenAI request failed')
+          const code =
+            chunk.type === 'error'
+              ? (chunk.code ?? undefined)
+              : (chunk.response.error?.code ?? undefined)
+          yield asChunk({
+            type: 'RUN_ERROR',
+            runId,
+            model,
+            timestamp,
+            message,
+            code,
+            error: { message, code },
+          })
+          return
+        }
+
+        if (chunk.type === 'response.output_text.delta' && chunk.delta) {
+          const textDelta = Array.isArray(chunk.delta)
+            ? chunk.delta.join('')
+            : typeof chunk.delta === 'string'
+              ? chunk.delta
+              : ''
+
+          if (textDelta) {
+            if (!hasEmittedTextMessageStart) {
+              hasEmittedTextMessageStart = true
+              yield asChunk({
+                type: 'TEXT_MESSAGE_START',
+                messageId,
+                model,
+                timestamp,
+                role: 'assistant',
+              })
+            }
+
+            accumulatedContent += textDelta
+
+            yield asChunk({
+              type: 'TEXT_MESSAGE_CONTENT',
+              messageId,
+              model,
+              timestamp,
+              delta: textDelta,
+              content: accumulatedContent,
+            })
+          }
+        }
+
+        // A refusal terminates the structured output run — the model declined
+        // to produce JSON conforming to the schema.
+        if (chunk.type === 'response.refusal.delta' && chunk.delta) {
+          const delta: unknown = chunk.delta
+          const refusalText =
+            typeof delta === 'string'
+              ? delta
+              : Array.isArray(delta)
+                ? delta.join('')
+                : ''
+          const message = `Structured output refused${refusalText ? `: ${refusalText}` : ''}`
+          yield asChunk({
+            type: 'RUN_ERROR',
+            runId,
+            model,
+            timestamp,
+            message,
+            code: 'refusal',
+            error: { message, code: 'refusal' },
+          })
+          return
+        }
+
+        if (chunk.type === 'response.completed') {
+          usage = {
+            promptTokens: chunk.response.usage?.input_tokens ?? 0,
+            completionTokens: chunk.response.usage?.output_tokens ?? 0,
+            totalTokens: chunk.response.usage?.total_tokens ?? 0,
+          }
+          finishReason = 'stop'
+        }
+
+        if (chunk.type === 'response.incomplete') {
+          finishReason =
+            chunk.response.incomplete_details?.reason === 'max_output_tokens'
+              ? 'length'
+              : 'stop'
+        }
+      }
+
+      // Always finalize, even if the upstream stream closed without a
+      // `response.completed` event (truncation, transport drop). Otherwise
+      // consumers wait forever on a missing terminal event.
+      if (hasEmittedTextMessageStart) {
+        yield asChunk({
+          type: 'TEXT_MESSAGE_END',
+          messageId,
+          model,
+          timestamp,
+        })
+      }
+
+      if (!accumulatedContent) {
+        const message = 'Structured output response contained no content'
+        logger.errors(message, { source: 'openai.structuredOutputStream' })
+        yield asChunk({
+          type: 'RUN_ERROR',
+          runId,
+          model,
+          timestamp,
+          message,
+          code: 'empty-response',
+          error: { message, code: 'empty-response' },
+        })
+        return
+      }
+
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(accumulatedContent)
+      } catch (parseError) {
+        const message =
+          parseError instanceof SyntaxError
+            ? `Failed to parse structured output as JSON: ${parseError.message}`
+            : 'Failed to parse structured output as JSON'
+        logger.errors(message, {
+          source: 'openai.structuredOutputStream',
+          error: parseError,
+        })
+        yield asChunk({
+          type: 'RUN_ERROR',
+          runId,
+          model,
+          timestamp,
+          message,
+          code: 'parse-error',
+          error: { message, code: 'parse-error' },
+        })
+        return
+      }
+
+      const transformed = transformNullsToUndefined(parsed)
+
+      yield asChunk({
+        type: 'CUSTOM',
+        name: 'structured-output.complete',
+        value: {
+          object: transformed,
+          raw: accumulatedContent,
+        },
+        model,
+        timestamp,
+      })
+
+      yield asChunk({
+        type: 'RUN_FINISHED',
+        runId,
+        threadId,
+        model,
+        timestamp,
+        usage,
+        finishReason: finishReason ?? 'stop',
+      })
+    } catch (error) {
+      logger.errors('openai.structuredOutputStream fatal', {
+        error: toRunErrorPayload(error, 'openai.structuredOutputStream failed'),
+        source: 'openai.structuredOutputStream',
+      })
+
+      if (!hasEmittedRunStarted) {
+        hasEmittedRunStarted = true
+        yield asChunk({
+          type: 'RUN_STARTED',
+          runId,
+          threadId,
+          model,
+          timestamp,
+        })
+      }
+
+      if (error instanceof APIUserAbortError) {
+        yield asChunk({
+          type: 'RUN_ERROR',
+          runId,
+          model,
+          timestamp,
+          message: 'Request aborted',
+          code: 'aborted',
+          error: { message: 'Request aborted', code: 'aborted' },
+        })
+        return
+      }
+
+      const err = error as Error & { code?: string }
+      yield asChunk({
+        type: 'RUN_ERROR',
+        runId,
+        model,
+        timestamp,
+        message: err.message || 'Unknown error',
+        code: err.code,
+        error: { message: err.message || 'Unknown error', code: err.code },
+      })
     }
   }
 

@@ -1,18 +1,34 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { createFileRoute } from '@tanstack/react-router'
 
 const SAMPLE_PROMPT =
   'I play indie rock and have a $1500 budget. Recommend two electric guitars and one acoustic to round out my rig.'
 
-const OPENROUTER_MODELS = [
-  { value: 'openai/gpt-5.2', label: 'OpenAI GPT-5.2' },
-  { value: 'openai/gpt-5.2-pro', label: 'OpenAI GPT-5.2 Pro' },
-  { value: 'openai/gpt-5.1', label: 'OpenAI GPT-5.1' },
-  { value: 'anthropic/claude-opus-4.7', label: 'Claude Opus 4.7' },
-  { value: 'anthropic/claude-sonnet-4.6', label: 'Claude Sonnet 4.6' },
-  { value: 'google/gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro (Preview)' },
-  { value: 'x-ai/grok-4.1-fast', label: 'Grok 4.1 Fast' },
-] as const
+type Provider = 'openai' | 'grok' | 'groq' | 'openrouter'
+
+const PROVIDER_MODELS: Record<
+  Provider,
+  Array<{ value: string; label: string }>
+> = {
+  openai: [
+    { value: 'gpt-4o', label: 'gpt-4o' },
+    { value: 'gpt-4o-mini', label: 'gpt-4o-mini' },
+  ],
+  grok: [
+    { value: 'grok-3', label: 'grok-3' },
+    { value: 'grok-4-0709', label: 'grok-4-0709' },
+  ],
+  groq: [
+    { value: 'llama-3.3-70b-versatile', label: 'llama-3.3-70b-versatile' },
+    { value: 'llama-3.1-8b-instant', label: 'llama-3.1-8b-instant' },
+  ],
+  openrouter: [
+    { value: 'openai/gpt-5.2', label: 'OpenRouter / GPT-5.2' },
+    { value: 'openai/gpt-5.1', label: 'OpenRouter / GPT-5.1' },
+    { value: 'anthropic/claude-sonnet-4.6', label: 'OpenRouter / Sonnet 4.6' },
+    { value: 'x-ai/grok-4.1-fast', label: 'OpenRouter / Grok 4.1 Fast' },
+  ],
+}
 
 interface RecommendationResult {
   title: string
@@ -27,68 +43,191 @@ interface RecommendationResult {
   nextSteps: Array<string>
 }
 
+interface StreamChunk {
+  type: string
+  delta?: string
+  content?: string
+  name?: string
+  value?: { object?: unknown; raw?: string; reasoning?: string }
+  message?: string
+}
+
 function StructuredOutputPage() {
   const [prompt, setPrompt] = useState(SAMPLE_PROMPT)
-  const [model, setModel] = useState<string>(OPENROUTER_MODELS[0].value)
+  const [provider, setProvider] = useState<Provider>('openrouter')
+  const [model, setModel] = useState<string>(PROVIDER_MODELS.openrouter[0].value)
+  const [stream, setStream] = useState(true)
   const [result, setResult] = useState<RecommendationResult | null>(null)
+  const [streamingText, setStreamingText] = useState<string>('')
+  const [deltaCount, setDeltaCount] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
+  const abortRef = useRef<AbortController | null>(null)
+
+  const onProviderChange = (next: Provider) => {
+    setProvider(next)
+    setModel(PROVIDER_MODELS[next][0].value)
+  }
 
   const handleGenerate = async () => {
     if (!prompt.trim()) return
     setIsLoading(true)
     setError(null)
     setResult(null)
+    setStreamingText('')
+    setDeltaCount(0)
+
+    const controller = new AbortController()
+    abortRef.current = controller
 
     try {
       const response = await fetch('/api/structured-output', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: prompt.trim(), model }),
+        body: JSON.stringify({
+          prompt: prompt.trim(),
+          provider,
+          model,
+          stream,
+        }),
+        signal: controller.signal,
       })
-      const payload = await response.json()
+
       if (!response.ok) {
-        throw new Error(payload.error || 'Request failed')
+        const errPayload = await response.json().catch(() => ({}))
+        throw new Error(errPayload.error || `Request failed (${response.status})`)
       }
-      setResult(payload.data as RecommendationResult)
+
+      if (!stream) {
+        const payload = await response.json()
+        setResult(payload.data as RecommendationResult)
+        return
+      }
+
+      // Streaming path: parse SSE, accumulate text deltas live, and capture
+      // the terminal `structured-output.complete` CUSTOM event.
+      const reader = response.body!.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let accumulated = ''
+      let deltas = 0
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        // SSE frames are separated by "\n\n"
+        let sepIdx = buffer.indexOf('\n\n')
+        while (sepIdx !== -1) {
+          const frame = buffer.slice(0, sepIdx)
+          buffer = buffer.slice(sepIdx + 2)
+          sepIdx = buffer.indexOf('\n\n')
+
+          for (const line of frame.split('\n')) {
+            if (!line.startsWith('data: ')) continue
+            const json = line.slice(6).trim()
+            if (!json) continue
+            let chunk: StreamChunk
+            try {
+              chunk = JSON.parse(json) as StreamChunk
+            } catch {
+              continue
+            }
+
+            if (chunk.type === 'TEXT_MESSAGE_CONTENT' && chunk.delta) {
+              accumulated += chunk.delta
+              deltas += 1
+              setStreamingText(accumulated)
+              setDeltaCount(deltas)
+            } else if (
+              chunk.type === 'CUSTOM' &&
+              chunk.name === 'structured-output.complete' &&
+              chunk.value?.object
+            ) {
+              setResult(chunk.value.object as RecommendationResult)
+            } else if (chunk.type === 'RUN_ERROR') {
+              throw new Error(chunk.message || 'Stream failed')
+            }
+          }
+        }
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unknown error')
+      if (err instanceof Error && err.name === 'AbortError') {
+        setError('Aborted')
+      } else {
+        setError(err instanceof Error ? err.message : 'Unknown error')
+      }
     } finally {
       setIsLoading(false)
+      abortRef.current = null
     }
   }
+
+  const handleAbort = () => abortRef.current?.abort()
 
   return (
     <div className="flex flex-col h-[calc(100vh-72px)] bg-gray-900 text-white">
       <div className="border-b border-orange-500/20 bg-gray-800 px-6 py-4">
-        <h2 className="text-xl font-semibold">
-          Structured Output (OpenRouter)
-        </h2>
+        <h2 className="text-xl font-semibold">Structured Output</h2>
         <p className="text-sm text-gray-400 mt-1">
           Calls <code className="text-orange-400">chat()</code> with an{' '}
-          <code className="text-orange-400">outputSchema</code> via the{' '}
-          <code className="text-orange-400">openRouterText</code> adapter and
-          parses the JSON result.
+          <code className="text-orange-400">outputSchema</code>. Toggle{' '}
+          <code className="text-orange-400">stream</code> to exercise{' '}
+          <code className="text-orange-400">structuredOutputStream</code> on the
+          selected provider; deltas render live while the final{' '}
+          <code className="text-orange-400">structured-output.complete</code>{' '}
+          event populates the parsed result.
         </p>
       </div>
 
       <div className="flex-1 overflow-y-auto p-6">
         <div className="max-w-2xl mx-auto space-y-6">
-          <div className="space-y-3">
-            <label className="text-sm text-gray-400">OpenRouter Model</label>
-            <select
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              disabled={isLoading}
-              className="w-full rounded-lg border border-orange-500/20 bg-gray-800/50 px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-orange-500/50 disabled:opacity-50"
-            >
-              {OPENROUTER_MODELS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-2">
+              <label className="text-sm text-gray-400">Provider</label>
+              <select
+                value={provider}
+                onChange={(e) => onProviderChange(e.target.value as Provider)}
+                disabled={isLoading}
+                className="w-full rounded-lg border border-orange-500/20 bg-gray-800/50 px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-orange-500/50 disabled:opacity-50"
+              >
+                <option value="openai">OpenAI</option>
+                <option value="grok">Grok (xAI)</option>
+                <option value="groq">Groq</option>
+                <option value="openrouter">OpenRouter</option>
+              </select>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm text-gray-400">Model</label>
+              <select
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                disabled={isLoading}
+                className="w-full rounded-lg border border-orange-500/20 bg-gray-800/50 px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-orange-500/50 disabled:opacity-50"
+              >
+                {PROVIDER_MODELS[provider].map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
+
+          <label className="flex items-center gap-2 text-sm text-gray-300">
+            <input
+              type="checkbox"
+              checked={stream}
+              onChange={(e) => setStream(e.target.checked)}
+              disabled={isLoading}
+              className="accent-orange-500"
+            />
+            Stream (single-request{' '}
+            <code className="text-orange-400">stream: true</code> +{' '}
+            <code className="text-orange-400">response_format: json_schema</code>
+            )
+          </label>
 
           <div className="space-y-3">
             <label className="text-sm text-gray-400">Prompt</label>
@@ -108,11 +247,27 @@ function StructuredOutputPage() {
               disabled={!prompt.trim() || isLoading}
               className="px-6 py-2 bg-orange-600 hover:bg-orange-700 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg text-sm font-medium transition-colors"
             >
-              {isLoading ? 'Generating...' : 'Generate Structured Output'}
+              {isLoading
+                ? stream
+                  ? 'Streaming...'
+                  : 'Generating...'
+                : 'Generate'}
             </button>
-            {result && (
+            {isLoading && stream && (
               <button
-                onClick={() => setResult(null)}
+                onClick={handleAbort}
+                className="px-6 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium transition-colors"
+              >
+                Abort
+              </button>
+            )}
+            {(result || streamingText) && !isLoading && (
+              <button
+                onClick={() => {
+                  setResult(null)
+                  setStreamingText('')
+                  setDeltaCount(0)
+                }}
                 className="px-6 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm font-medium transition-colors"
               >
                 Clear
@@ -126,8 +281,27 @@ function StructuredOutputPage() {
             </div>
           )}
 
+          {streamingText && !result && (
+            <div className="p-4 bg-gray-800/30 border border-gray-700/50 rounded-lg">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs text-gray-400 uppercase tracking-wider">
+                  Streaming JSON
+                </p>
+                <p className="text-xs text-orange-400">{deltaCount} deltas</p>
+              </div>
+              <pre className="text-xs text-gray-300 whitespace-pre-wrap break-words">
+                {streamingText}
+              </pre>
+            </div>
+          )}
+
           {result && (
             <div className="space-y-4">
+              {stream && deltaCount > 0 && (
+                <p className="text-xs text-gray-500">
+                  Reassembled from {deltaCount} streamed deltas.
+                </p>
+              )}
               <div className="p-4 bg-gray-800/50 border border-gray-700 rounded-lg">
                 <h3 className="text-lg font-semibold text-white">
                   {result.title}
