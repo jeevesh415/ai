@@ -405,8 +405,8 @@ function StructuredOutputPage() {
             <div className="space-y-4">
               {stream && deltaCount > 0 && (
                 <p className="text-xs text-gray-500">
-                  {hasFinalResult ? 'Final result' : 'Streaming'} —{' '}
-                  {deltaCount} deltas received
+                  {hasFinalResult ? 'Final result' : 'Streaming'} — {deltaCount}{' '}
+                  deltas received
                   {renderingPartial && (
                     <span className="ml-1 inline-block w-2 h-2 rounded-full bg-orange-500 animate-pulse" />
                   )}
@@ -460,12 +460,13 @@ function StructuredOutputPage() {
                         <div className="flex items-start justify-between gap-3">
                           <div>
                             <p className="text-white font-medium">
-                              {[rec.brand, rec.name].filter(Boolean).join(' ') ||
-                                (
-                                  <span className="text-gray-500 italic">
-                                    Loading…
-                                  </span>
-                                )}
+                              {[rec.brand, rec.name]
+                                .filter(Boolean)
+                                .join(' ') || (
+                                <span className="text-gray-500 italic">
+                                  Loading…
+                                </span>
+                              )}
                             </p>
                             {rec.type && (
                               <p className="text-xs text-orange-400 uppercase tracking-wider mt-0.5">
