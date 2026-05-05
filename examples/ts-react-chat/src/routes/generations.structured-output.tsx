@@ -222,9 +222,8 @@ function StructuredOutputPage() {
                 typeof (chunk.value as { reasoning?: string }).reasoning ===
                 'string'
               ) {
-                const finalReasoning = (
-                  chunk.value as { reasoning: string }
-                ).reasoning
+                const finalReasoning = (chunk.value as { reasoning: string })
+                  .reasoning
                 setReasoningFull(finalReasoning)
                 setReasoningLine(latestThought(finalReasoning))
               }
@@ -295,10 +294,7 @@ function StructuredOutputPage() {
         <div className="max-w-2xl mx-auto space-y-6">
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-2">
-              <label
-                htmlFor={providerId}
-                className="text-sm text-gray-400"
-              >
+              <label htmlFor={providerId} className="text-sm text-gray-400">
                 Provider
               </label>
               <select
