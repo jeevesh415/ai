@@ -117,9 +117,6 @@ export const Route = createFileRoute('/api/structured-output')({
               messages: [{ role: 'user', content: prompt }],
               outputSchema: GuitarRecommendationSchema,
               stream: true,
-              // Surface adapter request/provider/error logs so we can see
-              // exactly which Responses API events the model is emitting.
-              debug: true,
               abortController,
             }) as AsyncIterable<StreamChunk>
             return toServerSentEventsResponse(streamIterable, {
@@ -132,7 +129,6 @@ export const Route = createFileRoute('/api/structured-output')({
             modelOptions: modelOptions as never,
             messages: [{ role: 'user', content: prompt }],
             outputSchema: GuitarRecommendationSchema,
-            debug: true,
           })
 
           return new Response(JSON.stringify({ data: result }), {

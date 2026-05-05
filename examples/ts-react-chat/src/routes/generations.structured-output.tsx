@@ -91,10 +91,8 @@ function latestThought(reasoning: string): string {
 
 function StructuredOutputPage() {
   const [prompt, setPrompt] = useState(SAMPLE_PROMPT)
-  const [provider, setProvider] = useState<Provider>('openrouter')
-  const [model, setModel] = useState<string>(
-    PROVIDER_MODELS.openrouter[0].value,
-  )
+  const [provider, setProvider] = useState<Provider>('openai')
+  const [model, setModel] = useState<string>(PROVIDER_MODELS.openai[0].value)
   const [stream, setStream] = useState(true)
   const [result, setResult] = useState<PartialResult | null>(null)
   const [rawJson, setRawJson] = useState<string>('')
