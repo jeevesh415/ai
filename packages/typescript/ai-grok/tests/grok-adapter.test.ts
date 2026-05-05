@@ -844,9 +844,7 @@ describe('Grok structuredOutputStream', () => {
         {
           id: 'chatcmpl-err',
           model: 'grok-3',
-          choices: [
-            { delta: { content: '{"name":"Al' }, finish_reason: null },
-          ],
+          choices: [{ delta: { content: '{"name":"Al' }, finish_reason: null }],
         },
       ] as Array<unknown>
       return Promise.resolve({

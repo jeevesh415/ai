@@ -246,7 +246,11 @@ export class GrokTextAdapter<
       hasEmittedTextMessageEnd: false,
       hasFinalizedChoice: false,
       deferredUsage: undefined as
-        | { promptTokens: number; completionTokens: number; totalTokens: number }
+        | {
+            promptTokens: number
+            completionTokens: number
+            totalTokens: number
+          }
         | undefined,
       computedFinishReason: undefined as string | undefined,
     }

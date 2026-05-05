@@ -55,7 +55,9 @@ interface StreamChunk {
 function StructuredOutputPage() {
   const [prompt, setPrompt] = useState(SAMPLE_PROMPT)
   const [provider, setProvider] = useState<Provider>('openrouter')
-  const [model, setModel] = useState<string>(PROVIDER_MODELS.openrouter[0].value)
+  const [model, setModel] = useState<string>(
+    PROVIDER_MODELS.openrouter[0].value,
+  )
   const [stream, setStream] = useState(true)
   const [result, setResult] = useState<RecommendationResult | null>(null)
   const [streamingText, setStreamingText] = useState<string>('')
@@ -95,7 +97,9 @@ function StructuredOutputPage() {
 
       if (!response.ok) {
         const errPayload = await response.json().catch(() => ({}))
-        throw new Error(errPayload.error || `Request failed (${response.status})`)
+        throw new Error(
+          errPayload.error || `Request failed (${response.status})`,
+        )
       }
 
       if (!stream) {
@@ -225,7 +229,9 @@ function StructuredOutputPage() {
             />
             Stream (single-request{' '}
             <code className="text-orange-400">stream: true</code> +{' '}
-            <code className="text-orange-400">response_format: json_schema</code>
+            <code className="text-orange-400">
+              response_format: json_schema
+            </code>
             )
           </label>
 

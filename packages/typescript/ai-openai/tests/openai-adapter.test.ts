@@ -198,7 +198,9 @@ describe('OpenAI structuredOutputStream', () => {
       chatOptions: {
         model: 'gpt-4o-mini',
         messages: [{ role: 'user', content: 'Give me a person' }],
-        logger: (await import('@tanstack/ai/adapter-internals')).resolveDebugOption(false),
+        logger: (
+          await import('@tanstack/ai/adapter-internals')
+        ).resolveDebugOption(false),
       },
       outputSchema,
     })) {
@@ -252,7 +254,8 @@ describe('OpenAI structuredOutputStream', () => {
   })
 
   it('emits RUN_ERROR when accumulated content is not valid JSON', async () => {
-    const { resolveDebugOption } = await import('@tanstack/ai/adapter-internals')
+    const { resolveDebugOption } =
+      await import('@tanstack/ai/adapter-internals')
     const chunks: Array<Record<string, unknown>> = [
       { type: 'response.output_text.delta', delta: 'not json' },
       {
@@ -292,7 +295,8 @@ describe('OpenAI structuredOutputStream', () => {
   })
 
   it('emits empty-response RUN_ERROR when no content is streamed', async () => {
-    const { resolveDebugOption } = await import('@tanstack/ai/adapter-internals')
+    const { resolveDebugOption } =
+      await import('@tanstack/ai/adapter-internals')
     const chunks: Array<Record<string, unknown>> = [
       {
         type: 'response.completed',
@@ -331,7 +335,8 @@ describe('OpenAI structuredOutputStream', () => {
   })
 
   it('finalizes the run when upstream stream closes without response.completed', async () => {
-    const { resolveDebugOption } = await import('@tanstack/ai/adapter-internals')
+    const { resolveDebugOption } =
+      await import('@tanstack/ai/adapter-internals')
     const chunks: Array<Record<string, unknown>> = [
       { type: 'response.output_text.delta', delta: '{"name":"Alice"}' },
     ]
@@ -364,7 +369,8 @@ describe('OpenAI structuredOutputStream', () => {
   })
 
   it('terminates on response.failed without emitting RUN_FINISHED', async () => {
-    const { resolveDebugOption } = await import('@tanstack/ai/adapter-internals')
+    const { resolveDebugOption } =
+      await import('@tanstack/ai/adapter-internals')
     const chunks: Array<Record<string, unknown>> = [
       { type: 'response.output_text.delta', delta: '{"name":"Al' },
       {
@@ -404,7 +410,8 @@ describe('OpenAI structuredOutputStream', () => {
   })
 
   it('transforms null values to undefined on the parsed object', async () => {
-    const { resolveDebugOption } = await import('@tanstack/ai/adapter-internals')
+    const { resolveDebugOption } =
+      await import('@tanstack/ai/adapter-internals')
     const chunks: Array<Record<string, unknown>> = [
       {
         type: 'response.output_text.delta',

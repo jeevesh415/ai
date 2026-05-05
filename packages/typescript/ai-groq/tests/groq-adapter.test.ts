@@ -607,9 +607,7 @@ describe('Groq structuredOutputStream', () => {
       {
         id: 'chatcmpl-stream-1',
         model: 'llama-3.3-70b-versatile',
-        choices: [
-          { delta: { content: '{"name":"Ali' }, finish_reason: null },
-        ],
+        choices: [{ delta: { content: '{"name":"Ali' }, finish_reason: null }],
       },
       {
         id: 'chatcmpl-stream-1',
@@ -826,9 +824,7 @@ describe('Groq structuredOutputStream', () => {
         {
           id: 'chatcmpl-err',
           model: 'llama-3.3-70b-versatile',
-          choices: [
-            { delta: { content: '{"name":"Al' }, finish_reason: null },
-          ],
+          choices: [{ delta: { content: '{"name":"Al' }, finish_reason: null }],
         },
       ] as Array<unknown>
       return Promise.resolve({
