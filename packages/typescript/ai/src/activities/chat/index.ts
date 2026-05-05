@@ -1902,11 +1902,18 @@ async function* runStreamingStructuredOutputImpl<TSchema extends SchemaInput>(
     },
   )
 
+  // Adapters consume the abort signal via `chatOptions.request?.signal` and
+  // pass it to the underlying network call. Without this, aborting the SSE
+  // response never cancels the upstream provider request and a terminal
+  // structured-output.complete event still gets yielded after stop.
   const structuredChatOptions = {
     ...structuredTextOptions,
     model,
     messages: finalMessages,
     logger,
+    request: textOptions.abortController
+      ? { signal: textOptions.abortController.signal }
+      : undefined,
   }
 
   // Adapters that don't implement structuredOutputStream natively fall back
