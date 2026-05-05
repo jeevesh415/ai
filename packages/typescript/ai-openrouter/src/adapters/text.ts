@@ -381,6 +381,20 @@ export class OpenRouterTextAdapter<
       // owe consumers a CUSTOM + RUN_FINISHED (or RUN_ERROR), never silence.
       const resolvedModel = currentModel || chatOptions.model
 
+      // A truly empty stream (zero chunks) never enters processChoice, so
+      // RUN_STARTED was never emitted. Mirror the catch-block guard so the
+      // AG-UI lifecycle (RUN_STARTED → RUN_ERROR/FINISHED) is preserved.
+      if (!aguiState.hasEmittedRunStarted) {
+        aguiState.hasEmittedRunStarted = true
+        yield asChunk({
+          type: 'RUN_STARTED',
+          runId: aguiState.runId,
+          threadId: aguiState.threadId,
+          model: resolvedModel,
+          timestamp,
+        })
+      }
+
       if (aguiState.reasoningMessageId && !aguiState.hasClosedReasoning) {
         aguiState.hasClosedReasoning = true
         yield asChunk({

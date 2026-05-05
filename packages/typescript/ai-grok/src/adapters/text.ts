@@ -1,5 +1,6 @@
 import { APIUserAbortError } from 'openai'
 import { BaseTextAdapter } from '@tanstack/ai/adapters'
+import { toRunErrorPayload } from '@tanstack/ai/adapter-internals'
 import { validateTextProviderOptions } from '../text/text-provider-options'
 import { convertToolsToProviderFormat } from '../tools'
 import {
@@ -295,6 +296,18 @@ export class GrokTextAdapter<
         logger.provider(`provider=grok`, { chunk })
         if (chunk.model) currentModel = chunk.model
 
+        // OpenAI-compatible streams with `stream_options: { include_usage: true }`
+        // deliver the final usage payload in a trailing chunk whose `choices`
+        // array is empty. Capture usage outside the choice branch so it's
+        // never dropped.
+        if (chunk.usage) {
+          aguiState.deferredUsage = {
+            promptTokens: chunk.usage.prompt_tokens || 0,
+            completionTokens: chunk.usage.completion_tokens || 0,
+            totalTokens: chunk.usage.total_tokens || 0,
+          }
+        }
+
         if (!aguiState.hasEmittedRunStarted) {
           aguiState.hasEmittedRunStarted = true
           yield asChunk({
@@ -389,14 +402,6 @@ export class GrokTextAdapter<
         }
 
         if (choice.finish_reason) {
-          if (chunk.usage) {
-            aguiState.deferredUsage = {
-              promptTokens: chunk.usage.prompt_tokens || 0,
-              completionTokens: chunk.usage.completion_tokens || 0,
-              totalTokens: chunk.usage.total_tokens || 0,
-            }
-          }
-
           if (!aguiState.hasFinalizedChoice) {
             aguiState.hasFinalizedChoice = true
             aguiState.computedFinishReason =
@@ -519,7 +524,7 @@ export class GrokTextAdapter<
       })
     } catch (error) {
       logger.errors('grok.structuredOutputStream fatal', {
-        error,
+        error: toRunErrorPayload(error, 'grok.structuredOutputStream failed'),
         source: 'grok.structuredOutputStream',
       })
       if (!aguiState.hasEmittedRunStarted) {

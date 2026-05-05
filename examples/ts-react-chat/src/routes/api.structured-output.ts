@@ -27,6 +27,13 @@ const GuitarRecommendationSchema = z.object({
 
 type Provider = 'openai' | 'grok' | 'groq' | 'openrouter'
 
+const StructuredOutputRequestSchema = z.object({
+  prompt: z.string().min(1),
+  provider: z.enum(['openai', 'grok', 'groq', 'openrouter']).optional(),
+  model: z.string().optional(),
+  stream: z.boolean().optional(),
+})
+
 function adapterFor(provider: Provider, model?: string): AnyTextAdapter {
   switch (provider) {
     case 'openai':
@@ -94,16 +101,21 @@ export const Route = createFileRoute('/api/structured-output')({
   server: {
     handlers: {
       POST: async ({ request }) => {
-        const body = await request.json()
-        const { prompt, provider, model, stream } = body as {
-          prompt: string
-          provider?: Provider
-          model?: string
-          stream?: boolean
-        }
-        const resolvedProvider: Provider = provider || 'openrouter'
-
         try {
+          const parsed = StructuredOutputRequestSchema.safeParse(
+            await request.json(),
+          )
+          if (!parsed.success) {
+            return new Response(
+              JSON.stringify({ error: 'Invalid request body' }),
+              {
+                status: 400,
+                headers: { 'Content-Type': 'application/json' },
+              },
+            )
+          }
+          const { prompt, provider, model, stream } = parsed.data
+          const resolvedProvider: Provider = provider || 'openrouter'
           const modelOptions = reasoningOptionsFor(resolvedProvider, model)
 
           if (stream) {
@@ -124,11 +136,16 @@ export const Route = createFileRoute('/api/structured-output')({
             })
           }
 
+          const abortController = new AbortController()
+          request.signal.addEventListener('abort', () =>
+            abortController.abort(),
+          )
           const result = await chat({
             adapter: adapterFor(resolvedProvider, model),
             modelOptions: modelOptions as never,
             messages: [{ role: 'user', content: prompt }],
             outputSchema: GuitarRecommendationSchema,
+            abortController,
           })
 
           return new Response(JSON.stringify({ data: result }), {

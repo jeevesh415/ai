@@ -1857,9 +1857,20 @@ async function* runStreamingStructuredOutputImpl<TSchema extends SchemaInput>(
     // The structured-output stream emits its own RUN_STARTED + RUN_FINISHED
     // pair to bracket the run — drop both from the engine's output so
     // consumers see exactly one terminal lifecycle pair.
+    let agentLoopErrored = false
     try {
       for await (const chunk of engine.run()) {
         if (chunk.type === 'RUN_STARTED' || chunk.type === 'RUN_FINISHED') {
+          continue
+        }
+        if (chunk.type === 'RUN_ERROR') {
+          // The engine yielded RUN_ERROR without throwing (provider error mid
+          // agent loop). Forward it once and short-circuit before invoking
+          // structuredOutputStream — otherwise consumers would see a confusing
+          // RUN_ERROR → RUN_STARTED → structured-output.complete sequence and
+          // we would bill another provider call after a failed run.
+          agentLoopErrored = true
+          yield chunk
           continue
         }
         yield chunk
@@ -1879,6 +1890,10 @@ async function* runStreamingStructuredOutputImpl<TSchema extends SchemaInput>(
         code: 'agent-loop-failed',
         error: { message, code: 'agent-loop-failed' },
       } as unknown as StreamChunk
+      return
+    }
+
+    if (agentLoopErrored) {
       return
     }
 

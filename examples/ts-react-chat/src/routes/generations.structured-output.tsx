@@ -90,6 +90,9 @@ function latestThought(reasoning: string): string {
 }
 
 function StructuredOutputPage() {
+  const providerId = 'structured-output-provider'
+  const modelId = 'structured-output-model'
+  const promptId = 'structured-output-prompt'
   const [prompt, setPrompt] = useState(SAMPLE_PROMPT)
   const [provider, setProvider] = useState<Provider>('openai')
   const [model, setModel] = useState<string>(PROVIDER_MODELS.openai[0].value)
@@ -164,12 +167,9 @@ function StructuredOutputPage() {
       let accumulated = ''
       let reasoning = ''
       let deltas = 0
+      let sawComplete = false
 
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-
+      const processBuffer = () => {
         let sepIdx = buffer.indexOf('\n\n')
         while (sepIdx !== -1) {
           const frame = buffer.slice(0, sepIdx)
@@ -215,21 +215,40 @@ function StructuredOutputPage() {
               chunk.name === 'structured-output.complete' &&
               chunk.value?.object
             ) {
+              sawComplete = true
               setResult(chunk.value.object as PartialResult)
               setHasFinalResult(true)
               if (
                 typeof (chunk.value as { reasoning?: string }).reasoning ===
                 'string'
               ) {
-                setReasoningFull(
-                  (chunk.value as { reasoning: string }).reasoning,
-                )
+                const finalReasoning = (
+                  chunk.value as { reasoning: string }
+                ).reasoning
+                setReasoningFull(finalReasoning)
+                setReasoningLine(latestThought(finalReasoning))
               }
             } else if (chunk.type === 'RUN_ERROR') {
               throw new Error(chunk.message || 'Stream failed')
             }
           }
         }
+      }
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        processBuffer()
+      }
+
+      // Flush any buffered bytes from incomplete multi-byte UTF-8 sequences
+      // so the final SSE frame isn't dropped.
+      buffer += decoder.decode()
+      processBuffer()
+
+      if (!sawComplete) {
+        throw new Error('Stream ended before structured-output.complete')
       }
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') {
@@ -276,8 +295,14 @@ function StructuredOutputPage() {
         <div className="max-w-2xl mx-auto space-y-6">
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-2">
-              <label className="text-sm text-gray-400">Provider</label>
+              <label
+                htmlFor={providerId}
+                className="text-sm text-gray-400"
+              >
+                Provider
+              </label>
               <select
+                id={providerId}
                 value={provider}
                 onChange={(e) => onProviderChange(e.target.value as Provider)}
                 disabled={isLoading}
@@ -290,8 +315,11 @@ function StructuredOutputPage() {
               </select>
             </div>
             <div className="space-y-2">
-              <label className="text-sm text-gray-400">Model</label>
+              <label htmlFor={modelId} className="text-sm text-gray-400">
+                Model
+              </label>
               <select
+                id={modelId}
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
                 disabled={isLoading}
@@ -323,8 +351,11 @@ function StructuredOutputPage() {
           </label>
 
           <div className="space-y-3">
-            <label className="text-sm text-gray-400">Prompt</label>
+            <label htmlFor={promptId} className="text-sm text-gray-400">
+              Prompt
+            </label>
             <textarea
+              id={promptId}
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               placeholder="Describe what you want recommendations for..."
