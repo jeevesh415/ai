@@ -965,6 +965,209 @@ const VEO_2 = {
   [VEO_2.name]: VEO_2,
 } as const */
 
+const GEMINI_3_1_FLASH_LITE_IMAGE = {
+  name: 'gemini-3.1-flash-lite-image',
+  max_input_tokens: 65_536,
+  max_output_tokens: 58_982,
+  supports: {
+    input: ['image', 'text'],
+    output: ['text'],
+    capabilities: [
+      'batch_api',
+      'caching',
+      'function_calling',
+      'structured_output',
+      'thinking',
+    ],
+    tools: ['code_execution', 'file_search', 'google_search', 'url_context'],
+  },
+  pricing: {
+    input: {
+      normal: 0.25,
+    },
+    output: {
+      normal: 1.5,
+    },
+  },
+} as const satisfies ModelMeta<
+  GeminiToolConfigOptions &
+    GeminiSafetyOptions &
+    GeminiCommonConfigOptions &
+    GeminiCachedContentOptions &
+    GeminiStructuredOutputOptions &
+    GeminiThinkingOptions
+>
+
+const GEMINI_3_5_FLASH = {
+  name: 'gemini-3.5-flash',
+  max_input_tokens: 1_048_576,
+  max_output_tokens: 65_536,
+  supports: {
+    input: ['text', 'image', 'video', 'document', 'audio'],
+    output: ['text'],
+    capabilities: [
+      'batch_api',
+      'caching',
+      'function_calling',
+      'structured_output',
+      'thinking',
+    ],
+    tools: ['code_execution', 'file_search', 'google_search', 'url_context'],
+  },
+  pricing: {
+    input: {
+      normal: 1.5,
+      cached: 0.15,
+    },
+    output: {
+      normal: 9,
+    },
+  },
+} as const satisfies ModelMeta<
+  GeminiToolConfigOptions &
+    GeminiSafetyOptions &
+    GeminiCommonConfigOptions &
+    GeminiCachedContentOptions &
+    GeminiStructuredOutputOptions &
+    GeminiThinkingOptions
+>
+
+const GEMINI_3_5_FLASH_LITE = {
+  name: 'gemini-3.5-flash-lite',
+  max_input_tokens: 1_048_576,
+  max_output_tokens: 65_536,
+  supports: {
+    input: ['text', 'image', 'video', 'document', 'audio'],
+    output: ['text'],
+    capabilities: [
+      'batch_api',
+      'caching',
+      'function_calling',
+      'structured_output',
+      'thinking',
+    ],
+    tools: ['code_execution', 'file_search', 'google_search', 'url_context'],
+  },
+  pricing: {
+    input: {
+      normal: 0.3,
+      cached: 0.03,
+    },
+    output: {
+      normal: 2.5,
+    },
+  },
+} as const satisfies ModelMeta<
+  GeminiToolConfigOptions &
+    GeminiSafetyOptions &
+    GeminiCommonConfigOptions &
+    GeminiCachedContentOptions &
+    GeminiStructuredOutputOptions &
+    GeminiThinkingOptions
+>
+
+const GEMINI_3_6_FLASH = {
+  name: 'gemini-3.6-flash',
+  max_input_tokens: 1_048_576,
+  max_output_tokens: 65_536,
+  supports: {
+    input: ['text', 'image', 'video', 'document', 'audio'],
+    output: ['text'],
+    capabilities: [
+      'batch_api',
+      'caching',
+      'function_calling',
+      'structured_output',
+      'thinking',
+    ],
+    tools: ['code_execution', 'file_search', 'google_search', 'url_context'],
+  },
+  pricing: {
+    input: {
+      normal: 0.75,
+      cached: 0.075,
+    },
+    output: {
+      normal: 3.75,
+    },
+  },
+} as const satisfies ModelMeta<
+  GeminiToolConfigOptions &
+    GeminiSafetyOptions &
+    GeminiCommonConfigOptions &
+    GeminiCachedContentOptions &
+    GeminiStructuredOutputOptions &
+    GeminiThinkingOptions
+>
+
+const GEMINI_3_7_FLASH = {
+  name: 'gemini-3.7-flash',
+  max_input_tokens: 1_048_576,
+  max_output_tokens: 65_536,
+  supports: {
+    input: ['text', 'image', 'video', 'document', 'audio'],
+    output: ['text'],
+    capabilities: [
+      'batch_api',
+      'caching',
+      'function_calling',
+      'structured_output',
+      'thinking',
+    ],
+    tools: ['code_execution', 'file_search', 'google_search', 'url_context'],
+  },
+  pricing: {
+    input: {
+      normal: 0.75,
+      cached: 0.075,
+    },
+    output: {
+      normal: 3.75,
+    },
+  },
+} as const satisfies ModelMeta<
+  GeminiToolConfigOptions &
+    GeminiSafetyOptions &
+    GeminiCommonConfigOptions &
+    GeminiCachedContentOptions &
+    GeminiStructuredOutputOptions &
+    GeminiThinkingOptions
+>
+
+const GEMINI_3_8_FLASH = {
+  name: 'gemini-3.8-flash',
+  max_input_tokens: 1_048_576,
+  max_output_tokens: 65_536,
+  supports: {
+    input: ['text', 'image', 'video', 'document', 'audio'],
+    output: ['text'],
+    capabilities: [
+      'batch_api',
+      'caching',
+      'function_calling',
+      'structured_output',
+      'thinking',
+    ],
+    tools: ['code_execution', 'file_search', 'google_search', 'url_context'],
+  },
+  pricing: {
+    input: {
+      normal: 0.75,
+      cached: 0.075,
+    },
+    output: {
+      normal: 3.75,
+    },
+  },
+} as const satisfies ModelMeta<
+  GeminiToolConfigOptions &
+    GeminiSafetyOptions &
+    GeminiCommonConfigOptions &
+    GeminiCachedContentOptions &
+    GeminiStructuredOutputOptions &
+    GeminiThinkingOptions
+>
+
 export const GEMINI_MODELS = [
   GEMINI_3_1_PRO.name,
   GEMINI_3_PRO.name,
@@ -977,6 +1180,13 @@ export const GEMINI_MODELS = [
   GEMINI_2_5_FLASH_LITE_PREVIEW.name,
   GEMINI_2_FLASH.name,
   GEMINI_2_FLASH_LITE.name,
+
+  GEMINI_3_1_FLASH_LITE_IMAGE.name,
+  GEMINI_3_5_FLASH.name,
+  GEMINI_3_5_FLASH_LITE.name,
+  GEMINI_3_6_FLASH.name,
+  GEMINI_3_7_FLASH.name,
+  GEMINI_3_8_FLASH.name,
 ] as const
 
 export type GeminiModels = (typeof GEMINI_MODELS)[number]
@@ -1135,6 +1345,42 @@ export type GeminiChatModelProviderOptionsByName = {
     GeminiCommonConfigOptions &
     GeminiCachedContentOptions &
     GeminiStructuredOutputOptions
+  [GEMINI_3_1_FLASH_LITE_IMAGE.name]: GeminiToolConfigOptions &
+    GeminiSafetyOptions &
+    GeminiCommonConfigOptions &
+    GeminiCachedContentOptions &
+    GeminiStructuredOutputOptions &
+    GeminiThinkingOptions
+  [GEMINI_3_5_FLASH.name]: GeminiToolConfigOptions &
+    GeminiSafetyOptions &
+    GeminiCommonConfigOptions &
+    GeminiCachedContentOptions &
+    GeminiStructuredOutputOptions &
+    GeminiThinkingOptions
+  [GEMINI_3_5_FLASH_LITE.name]: GeminiToolConfigOptions &
+    GeminiSafetyOptions &
+    GeminiCommonConfigOptions &
+    GeminiCachedContentOptions &
+    GeminiStructuredOutputOptions &
+    GeminiThinkingOptions
+  [GEMINI_3_6_FLASH.name]: GeminiToolConfigOptions &
+    GeminiSafetyOptions &
+    GeminiCommonConfigOptions &
+    GeminiCachedContentOptions &
+    GeminiStructuredOutputOptions &
+    GeminiThinkingOptions
+  [GEMINI_3_7_FLASH.name]: GeminiToolConfigOptions &
+    GeminiSafetyOptions &
+    GeminiCommonConfigOptions &
+    GeminiCachedContentOptions &
+    GeminiStructuredOutputOptions &
+    GeminiThinkingOptions
+  [GEMINI_3_8_FLASH.name]: GeminiToolConfigOptions &
+    GeminiSafetyOptions &
+    GeminiCommonConfigOptions &
+    GeminiCachedContentOptions &
+    GeminiStructuredOutputOptions &
+    GeminiThinkingOptions
 }
 
 /**
@@ -1183,4 +1429,10 @@ export type GeminiModelInputModalitiesByName = {
   [GEMINI_2_5_FLASH_PREVIEW.name]: typeof GEMINI_2_5_FLASH_PREVIEW.supports.input
   [GEMINI_2_FLASH.name]: typeof GEMINI_2_FLASH.supports.input
   [GEMINI_2_FLASH_LITE.name]: typeof GEMINI_2_FLASH_LITE.supports.input
+  [GEMINI_3_1_FLASH_LITE_IMAGE.name]: typeof GEMINI_3_1_FLASH_LITE_IMAGE.supports.input
+  [GEMINI_3_5_FLASH.name]: typeof GEMINI_3_5_FLASH.supports.input
+  [GEMINI_3_5_FLASH_LITE.name]: typeof GEMINI_3_5_FLASH_LITE.supports.input
+  [GEMINI_3_6_FLASH.name]: typeof GEMINI_3_6_FLASH.supports.input
+  [GEMINI_3_7_FLASH.name]: typeof GEMINI_3_7_FLASH.supports.input
+  [GEMINI_3_8_FLASH.name]: typeof GEMINI_3_8_FLASH.supports.input
 }
